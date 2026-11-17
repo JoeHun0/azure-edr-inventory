@@ -13,6 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Syntax check
-        run: bash -n azure-edr-inventory.sh && bash -n tests/run-tests.sh && bash -n tests/mock/az
+        run: bash -n azure-edr-inventory.sh && bash -n edr-summary.sh && bash -n tests/run-tests.sh && bash -n tests/mock/az
       - name: Tests (mock az, no Azure access)
         run: tests/run-tests.sh

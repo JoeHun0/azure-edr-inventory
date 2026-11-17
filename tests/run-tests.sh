@@ -82,6 +82,23 @@ for f in machines subscriptions; do
   if cmp -s "$WORK/out/$f.tsv" "$WORK/win/$f.tsv"; then ok "$f.tsv same as on Linux"; else bad "$f.tsv same as on Linux"; fi
 done
 
+echo "edr-summary.sh"
+SUM="$HERE/../edr-summary.sh"
+bash "$SUM" "$WORK/out" > "$WORK/sum.md" 2>"$WORK/sumlog" && ok "summary exits 0" || { bad "summary exits 0"; cat "$WORK/sumlog"; }
+has_line() { if grep -qF -- "$2" "$WORK/$3"; then ok "$1"; else bad "$1"; fi; }
+has_line "machine counts"          "Machines: **11** (7 VMs, 2 scale sets, 2 Arc machines), of which active: **8**." sum.md
+has_line "coverage"                "| Protected (EDR present) | 4 of 11 (36%) | 3 of 8 (38%) | 3 of 7 (43%) |" sum.md
+has_line "risk table"              "| CRITICAL | 2 | 2 | 2 |" sum.md
+has_line "OS names normalised"     "| Linux | 6 | 5 | 4 |" sum.md
+has_line "status table"            "| NONE - Defender plan on, MDE integration off | 2 | 0 | 1 | 1 |" sum.md
+has_line "open ports"              "- Open ports: port 22: 2, port 3389: 2, port 5985: 1, port 5986: 1" sum.md
+has_line "Defender plans"          "| Standard P2 | 1 | 1 | 1 | 1 |" sum.md
+if ! grep -qE "vm-|203\.0\.113|prod-app|Tenant Root" "$WORK/sum.md"; then ok "no names or IPs without -n"; else bad "no names or IPs without -n"; fi
+bash "$SUM" -n "$WORK/out" > "$WORK/sumn.md" 2>/dev/null
+has_line "-n lists CRITICAL machines" "| CRITICAL | vm-lnx-exposed | VM | prod-app | Linux | NONE - Defender plan on, no sensor | 203.0.113.10 | 22 |" sumn.md
+has_line "-n lists subscriptions"  "| dev | Free |  | 1 | 2 | 1 |" sumn.md
+if ! bash "$SUM" "$WORK/nonexistent" >/dev/null 2>&1; then ok "rejects a folder without inventory"; else bad "rejects a folder without inventory"; fi
+
 echo "argument checks"
 if ! bash "$SCRIPT" -s not-a-guid >/dev/null 2>&1; then ok "rejects a malformed subscription ID"; else bad "rejects a malformed subscription ID"; fi
 if ! bash "$SCRIPT" -p "22,3389" >/dev/null 2>&1; then ok "rejects a malformed port list"; else bad "rejects a malformed port list"; fi

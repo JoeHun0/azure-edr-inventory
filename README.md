@@ -131,6 +131,28 @@ Network Watcher, to confirm a finding.
   the exposure columns are empty.
 - Azure public cloud only.
 
+## Summary for reports
+
+`edr-summary.sh` turns an output folder into a short Markdown summary. It needs only `jq`, no Azure
+access:
+
+```bash
+./edr-summary.sh edr-inventory-20261117-0930        # counts only
+./edr-summary.sh -n edr-inventory-20261117-0930     # plus CRITICAL/HIGH machines and subscriptions to fix
+```
+
+It shows:
+- coverage: protected share of all machines, of active machines, and of active machines excluding AKS
+- machines per risk level, and per endpoint protection status split into Windows and Linux
+- other EDR vendors found
+- internet exposure: public IPs and open management ports
+- Defender for Servers plans per subscription
+- a short "fix first" list
+
+**Without `-n`, the summary contains no machine, subscription or management-group names and no IP
+addresses**, so it can go into a report or ticket. With `-n` it lists the CRITICAL and HIGH machines
+(with public IPs) and the subscriptions to fix. Treat that version like the inventory itself.
+
 ## After the inventory
 
 These are common next steps, roughly in order:
