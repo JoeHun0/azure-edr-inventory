@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Mock of the az CLI for the test suite: a small fictional tenant.
+#
+# Subscriptions: prod-app (Defender for Servers P1, MDE integration on)
+#                dev      (Free)
+#                platform (P2, MDE integration OFF)
+#                legacy   (missing from Resource Graph pricing -> read via REST: Free)
+# Machines and expected results:
+#   vm-win-ok          prod-app  MDE                                  -> LOW
+#   vm-lnx-exposed     prod-app  no agent, SSH open (NIC NSG)         -> CRITICAL
+#   vm-win-av          dev       Antimalware only, Basic IP, no NSG   -> CRITICAL (all ports open)
+#   vm-lnx-cs          dev       CrowdStrike, subnet NSG: 22 denied,
+#                                3000-4000 allowed (3389 open)        -> HIGH
+#   vm-win-off         platform  no agent, deallocated                -> MEDIUM
+#   vm-lnx-mdefail     platform  MDE extension failed, running        -> HIGH
+#   vm-lnx-std         legacy    no agent, Standard IP without NSG    -> HIGH (closed by default)
+#   aks-nodepool1-vmss prod-app  AKS node pool, no agent              -> MEDIUM
+#   web-vmss           dev       MDE in the scale set model, 0 nodes  -> LOW
+#   arc-win            prod-app  Arc, MDE                             -> LOW
+#   arc-lnx            platform  Arc, disconnected, no agent          -> MEDIUM
+# The VM query is split over two pages to exercise Resource Graph paging.
+# SPDX-License-Identifier: MIT
+
+args="$*"
+url=""; prev=""
+for x in "$@"; do [[ "$prev" == "--url" ]] && url="$x"; prev="$x"; done
+
+S1=11111111-0000-0000-0000-000000000001
+S2=11111111-0000-0000-0000-000000000002
+S3=11111111-0000-0000-0000-000000000003
+S4=11111111-0000-0000-0000-000000000004
+NET=/subscriptions/$S1/resourceGroups/Net/providers/Microsoft.Network
+
+vm() {  # vm <sub> <name> <os> <osName> <power> <nicName or "">
+  local nics='[]'
+  [[ -n "$6" ]] && nics="[{\"id\":\"$NET/networkInterfaces/$6\"}]"
+  printf '{"id":"/subscriptions/%s/resourcegroups/rg/providers/microsoft.compute/virtualmachines/%s","name":"%s","subscriptionId":"%s","resourceGroup":"rg","location":"westeurope","osType":"%s","osName":"%s","osVersion":"1.0","image":"pub/offer/sku","power":"%s","nics":%s}' \
+    "$1" "$2" "$2" "$1" "$3" "$4" "$5" "$nics"
+}
+ext() {  # ext <sub> <vm> <publisher> <type> <state>
+  printf '{"machineId":"/subscriptions/%s/resourcegroups/rg/providers/microsoft.compute/virtualmachines/%s","publisher":"%s","extType":"%s","state":"%s"}' "$1" "$2" "$3" "$4" "$5"
+}
+nic() {  # nic <name> <nsg or ""> <subnet> <pip or "">
+  local nsg="" pip=""
+  [[ -n "$2" ]] && nsg="$(echo "$NET/networkSecurityGroups/$2" | tr 'A-Z' 'a-z')"
+  [[ -n "$4" ]] && pip=",\"publicIPAddress\":{\"id\":\"$NET/publicIPAddresses/$4\"}"
+  printf '{"id":"%s","nsgId":"%s","ipConfigs":[{"name":"ipconfig1","properties":{"subnet":{"id":"%s/virtualNetworks/vnet/subnets/%s"}%s}}]}' \
+    "$(echo "$NET/networkInterfaces/$1" | tr 'A-Z' 'a-z')" "$nsg" "$NET" "$3" "$pip"
+}
+lc() { echo "$1" | tr 'A-Z' 'a-z'; }
+page() { printf '{"data":[%s],"skip_token":%s}\n' "$1" "${2:-null}"; }
+
+case "$args" in
+  "extension show"*) exit 0 ;;
+  "account show"*) echo 00000000-0000-0000-0000-0000000000aa ;;
+
+  graph\ query*)
+    case "$args" in
+      *microsoft.resources/subscriptions*) page "
+        {\"subscriptionId\":\"$S1\",\"name\":\"prod-app\",\"state\":\"Enabled\",\"mgChain\":[{\"displayName\":\"Prod\"},{\"displayName\":\"Tenant Root Group\"}]},
+        {\"subscriptionId\":\"$S2\",\"name\":\"dev\",\"state\":\"Enabled\",\"mgChain\":[{\"displayName\":\"Non-prod\"},{\"displayName\":\"Tenant Root Group\"}]},
+        {\"subscriptionId\":\"$S3\",\"name\":\"platform\",\"state\":\"Enabled\",\"mgChain\":[]},
+        {\"subscriptionId\":\"$S4\",\"name\":\"legacy\",\"state\":\"Enabled\",\"mgChain\":null}" ;;
+      *microsoft.security/pricings*) page "
+        {\"subscriptionId\":\"$S1\",\"tier\":\"Standard\",\"subPlan\":\"P1\"},
+        {\"subscriptionId\":\"$S2\",\"tier\":\"Free\",\"subPlan\":\"\"},
+        {\"subscriptionId\":\"$S3\",\"tier\":\"Standard\",\"subPlan\":\"P2\"}" ;;
+      *"microsoft.compute/virtualmachines'"*)
+        if [[ "$args" == *--skip-token* ]]; then page "
+          $(vm $S2 vm-lnx-cs Linux Ubuntu PowerState/running nic-cs),
+          $(vm $S3 vm-win-off Windows '' PowerState/deallocated ''),
+          $(vm $S3 vm-lnx-mdefail Linux 'Red Hat' PowerState/running ''),
+          $(vm $S4 vm-lnx-std Linux Debian PowerState/running nic-std)"
+        else page "
+          $(vm $S1 vm-win-ok Windows 'Windows Server 2022 Datacenter' PowerState/running nic-ok),
+          $(vm $S1 vm-lnx-exposed Linux Ubuntu PowerState/running nic-exp),
+          $(vm $S2 vm-win-av Windows 'Windows Server 2016' PowerState/running nic-av)" '"page2"'
+        fi ;;
+      *virtualmachines/extensions*) page "
+        $(ext $S1 vm-win-ok Microsoft.Azure.AzureDefenderForServers MDE.Windows Succeeded),
+        $(ext $S1 vm-win-ok Microsoft.Azure.Monitor AzureMonitorWindowsAgent Succeeded),
+        $(ext $S2 vm-win-av Microsoft.Azure.Security IaaSAntimalware Succeeded),
+        $(ext $S2 vm-lnx-cs CrowdStrike.Falcon FalconSensorLinux Succeeded),
+        $(ext $S3 vm-lnx-mdefail Microsoft.Azure.AzureDefenderForServers MDE.Linux Failed)" ;;
+      *virtualmachinescalesets*) page "
+        {\"id\":\"/subscriptions/$S1/resourcegroups/mc_aks/providers/microsoft.compute/virtualmachinescalesets/aks-nodepool1-vmss\",\"name\":\"aks-nodepool1-vmss\",\"subscriptionId\":\"$S1\",\"resourceGroup\":\"mc_aks\",\"location\":\"westeurope\",\"osType\":\"Linux\",\"image\":\"//\",\"capacity\":3,\"extensions\":[{\"name\":\"vmssCSE\",\"properties\":{\"publisher\":\"Microsoft.Azure.Extensions\",\"type\":\"CustomScript\"}}],\"aks\":true},
+        {\"id\":\"/subscriptions/$S2/resourcegroups/rg/providers/microsoft.compute/virtualmachinescalesets/web-vmss\",\"name\":\"web-vmss\",\"subscriptionId\":\"$S2\",\"resourceGroup\":\"rg\",\"location\":\"westeurope\",\"osType\":\"Windows\",\"image\":\"MicrosoftWindowsServer/WindowsServer/2022-datacenter\",\"capacity\":0,\"extensions\":[{\"name\":\"MDE\",\"properties\":{\"publisher\":\"Microsoft.Azure.AzureDefenderForServers\",\"type\":\"MDE.Windows\"}}],\"aks\":false}" ;;
+      *"hybridcompute/machines'"*) page "
+        {\"id\":\"/subscriptions/$S1/resourcegroups/onprem/providers/microsoft.hybridcompute/machines/arc-win\",\"name\":\"arc-win\",\"subscriptionId\":\"$S1\",\"resourceGroup\":\"onprem\",\"location\":\"westeurope\",\"osType\":\"windows\",\"osName\":\"Windows Server 2019 Standard\",\"osVersion\":\"10.0.17763\",\"status\":\"Connected\"},
+        {\"id\":\"/subscriptions/$S3/resourcegroups/onprem/providers/microsoft.hybridcompute/machines/arc-lnx\",\"name\":\"arc-lnx\",\"subscriptionId\":\"$S3\",\"resourceGroup\":\"onprem\",\"location\":\"westeurope\",\"osType\":\"linux\",\"osName\":\"CentOS Linux 7\",\"osVersion\":\"7.9\",\"status\":\"Disconnected\"}" ;;
+      *hybridcompute/machines/extensions*) page "
+        {\"machineId\":\"/subscriptions/$S1/resourcegroups/onprem/providers/microsoft.hybridcompute/machines/arc-win\",\"publisher\":\"Microsoft.Azure.AzureDefenderForServers\",\"extType\":\"MDE.Windows\",\"state\":\"Succeeded\"}" ;;
+      *networkinterfaces*) page "
+        $(nic nic-ok '' app ''),
+        $(nic nic-exp NSG-A app pip-exp),
+        $(nic nic-av '' open pip-av),
+        $(nic nic-cs '' guarded pip-cs),
+        $(nic nic-std '' open pip-std)" ;;
+      *publicipaddresses*) page "
+        {\"id\":\"$(lc $NET/publicIPAddresses/pip-exp)\",\"ip\":\"203.0.113.10\",\"sku\":\"Standard\"},
+        {\"id\":\"$(lc $NET/publicIPAddresses/pip-av)\",\"ip\":\"203.0.113.11\",\"sku\":\"Basic\"},
+        {\"id\":\"$(lc $NET/publicIPAddresses/pip-cs)\",\"ip\":\"\",\"sku\":\"Standard\"},
+        {\"id\":\"$(lc $NET/publicIPAddresses/pip-std)\",\"ip\":\"203.0.113.13\",\"sku\":\"Standard\"}" ;;
+      *networksecuritygroups*) page "
+        {\"id\":\"$(lc $NET/networkSecurityGroups/NSG-A)\",\"name\":\"NSG-A\",\"rules\":[
+          {\"name\":\"allow-ssh\",\"properties\":{\"priority\":100,\"direction\":\"Inbound\",\"access\":\"Allow\",\"protocol\":\"Tcp\",\"sourceAddressPrefix\":\"Internet\",\"destinationPortRange\":\"22\"}},
+          {\"name\":\"allow-https-vnet\",\"properties\":{\"priority\":110,\"direction\":\"Inbound\",\"access\":\"Allow\",\"protocol\":\"Tcp\",\"sourceAddressPrefix\":\"VirtualNetwork\",\"destinationPortRange\":\"3389\"}}]},
+        {\"id\":\"$(lc $NET/networkSecurityGroups/NSG-B)\",\"name\":\"NSG-B\",\"rules\":[
+          {\"name\":\"deny-ssh\",\"properties\":{\"priority\":100,\"direction\":\"Inbound\",\"access\":\"Deny\",\"protocol\":\"*\",\"sourceAddressPrefix\":\"*\",\"destinationPortRange\":\"22\"}},
+          {\"name\":\"allow-range\",\"properties\":{\"priority\":200,\"direction\":\"Inbound\",\"access\":\"Allow\",\"protocol\":\"Tcp\",\"sourceAddressPrefixes\":[\"0.0.0.0/0\"],\"destinationPortRanges\":[\"3000-4000\",\"80\"]}},
+          {\"name\":\"outbound-any\",\"properties\":{\"priority\":100,\"direction\":\"Outbound\",\"access\":\"Allow\",\"protocol\":\"*\",\"sourceAddressPrefix\":\"*\",\"destinationPortRange\":\"*\"}}]}" ;;
+      *microsoft.network/virtualnetworks*) page "
+        {\"id\":\"$(lc $NET/virtualNetworks/vnet/subnets/app)\",\"nsgId\":\"\"},
+        {\"id\":\"$(lc $NET/virtualNetworks/vnet/subnets/open)\",\"nsgId\":\"\"},
+        {\"id\":\"$(lc $NET/virtualNetworks/vnet/subnets/guarded)\",\"nsgId\":\"$(lc $NET/networkSecurityGroups/NSG-B)\"}" ;;
+      *) echo "mock az: unhandled graph query: $args" >&2; exit 1 ;;
+    esac ;;
+
+  rest*)
+    case "$url" in
+      */subscriptions/$S4/providers/Microsoft.Security/pricings/VirtualMachines*)
+        echo '{"name":"VirtualMachines","properties":{"pricingTier":"Free"}}' ;;
+      */subscriptions/$S1/providers/Microsoft.Security/settings/WDATP*) echo true ;;
+      */subscriptions/$S3/providers/Microsoft.Security/settings/WDATP*) echo false ;;
+      *) echo "mock az: unhandled url $url" >&2; exit 1 ;;
+    esac ;;
+
+  *) echo "mock az: unhandled call: $args" >&2; exit 1 ;;
+esac

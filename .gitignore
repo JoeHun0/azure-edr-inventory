@@ -1,0 +1,5 @@
+# Inventory results list unprotected and exposed servers - never commit them.
+edr-inventory-*/
+*.tsv
+raw/
+*.jsonl
