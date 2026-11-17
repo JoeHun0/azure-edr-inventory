@@ -440,6 +440,9 @@ jq -n -c \
   --argjson scope "$SUBS_JSON" --argjson ports "$PORTS_JSON" --arg other "$OTHER_EDR" \
   --argjson scheduled "$([[ $SCHEDULED == 1 ]] && echo true || echo false)" \
   "$JQ_MODEL" > "$RAW/model.jsonl" || die "report building failed (raw data kept in $RAW)"
+# how the ratings were made, for the summary (rewritten on every build, also with -R)
+jq -n -c --argjson scheduled "$([[ $SCHEDULED == 1 ]] && echo true || echo false)" --arg ports "$PORTS" \
+  '{scheduled: $scheduled, ports: $ports}' > "$RAW/rating.json"
 
 # one line per AKS cluster in scope, with its Defender for Containers coverage
 jq -n -c --slurpfile aks "$RAW/aks.jsonl" --slurpfile subs "$RAW/subs.jsonl" \

@@ -186,6 +186,13 @@ is "  ... old loose AKS flag no longer used" "$(col "$WORK/oldrun/machines.tsv" 
 if ! bash "$SCRIPT" -R "$WORK/rb" -o "$WORK/x" >/dev/null 2>&1; then ok "-R can't be combined with -o"; else bad "-R can't be combined with -o"; fi
 if ! bash "$SCRIPT" -R "$WORK/nonexistent" >/dev/null 2>&1; then ok "-R rejects a folder without raw data"; else bad "-R rejects a folder without raw data"; fi
 
+echo "-r note in the report"
+bash "$SUM" "$WORK/sched" 2>/dev/null
+line "-r is stated in the report"           "Stopped machines rated as running" "$WORK/sched/edr-report.md"
+if ! grep -q "Stopped machines rated as running" "$WORK/sum/edr-report.md"; then ok "without -r: no such note"; else bad "without -r: no such note"; fi
+bash "$SCRIPT" -R "$WORK/sched" 2>/dev/null; bash "$SUM" "$WORK/sched" 2>/dev/null
+if ! grep -q "Stopped machines rated as running" "$WORK/sched/edr-report.md"; then ok "rebuild without -r drops the note"; else bad "rebuild without -r drops the note"; fi
+
 echo "argument checks"
 if ! bash "$SCRIPT" -s not-a-guid >/dev/null 2>&1; then ok "rejects a malformed subscription ID"; else bad "rejects a malformed subscription ID"; fi
 if ! bash "$SCRIPT" -p "22,3389" >/dev/null 2>&1; then ok "rejects a malformed port list"; else bad "rejects a malformed port list"; fi

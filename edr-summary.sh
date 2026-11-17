@@ -205,6 +205,10 @@ read -r -d '' JQ_REPORT <<'JQ'
     elif $scope.subscriptionFilter == true then
       "> Limited to selected subscriptions (`-s`).", ""
     else empty end ),
+  ( if $rating.scheduled == true then
+      "> **Stopped machines rated as running (`-r`):** stopped and deallocated VMs, and scale sets at 0 instances, are rated as if they were running, for VMs that a schedule starts and stops. Some of them may have been shut down on purpose; the worklist's `state` column shows the actual state at the time of the inventory.",
+      ""
+    else empty end ),
   "Machines: **\($n)** (\($M | cnt(.kind == "VM")) VMs, \($M | cnt(.kind == "VMSS")) scale sets, \($M | cnt(.kind == "Arc")) Arc machines), of which active: **\($act | length)**.",
   "Subscriptions: **\($S | length)**.",
   "",
@@ -296,8 +300,9 @@ JQ
 
 SCOPE=$(cat "$DIR/raw/scope.json" 2>/dev/null || echo '{}')   # absent in runs made before it existed
 AKSF="$DIR/raw/aks_model.jsonl"; [[ -f "$AKSF" ]] || AKSF=/dev/null   # likewise
+RATING=$(cat "$DIR/raw/rating.json" 2>/dev/null || echo '{}')         # likewise
 ARGS=(--slurpfile m "$DIR/raw/model.jsonl" --rawfile subs "$DIR/subscriptions.tsv" --arg detected "$DETECTED"
-      --argjson scope "$SCOPE" --slurpfile aks "$AKSF")
+      --argjson scope "$SCOPE" --slurpfile aks "$AKSF" --argjson rating "$RATING")
 # The rows go through a file: as a command-line argument they would hit the OS limit
 # (128 KB per argument on Linux, 32 KB per command line on Windows).
 ITEMS=$(mktemp) || die "cannot create a temporary file"

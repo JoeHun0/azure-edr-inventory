@@ -143,7 +143,7 @@ extension. *Active* means a running VM, a scale set with more than 0 instances, 
 **VMs on a start/stop schedule:** if an automation starts and stops your VMs, a VM that happens to be off
 during the run is still in daily use. Run the inventory with `-r` (or during working hours), so stopped VMs
 and scale sets at 0 instances are rated as if they were running. The `state` column still shows the real
-state.
+state, and `edr-report.md` notes that the run used `-r`.
 
 | Rating | Condition |
 |---|---|
