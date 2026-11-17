@@ -167,6 +167,14 @@ read -r -d '' JQ_REPORT <<'JQ'
   "",
   "Inventory of \($detected) (azure-edr-inventory). Counts only.",
   "",
+  "> **About this data:** these numbers come straight from Azure Resource Graph and the Azure management API (the control plane), not from inside the machines. Treat them as indicative, not exact:",
+  "> - an EDR installed without a VM extension (script, GPO, image) shows as missing;",
+  "> - an installed extension doesn't prove a healthy, reporting sensor;",
+  "> - internet exposure is a static reading of NSG rules: Azure Firewall, NVAs, load balancer NAT rules and service tags are not considered;",
+  "> - Resource Graph can lag a few minutes behind recent changes.",
+  ">",
+  "> Confirm individual machines in the EDR console and with Network Watcher before acting on them.",
+  "",
   ( if $scope.rootAccess == false then
       "> **Warning: incomplete inventory.** The account that ran it couldn't read the tenant root management group (no Reader role there, or a PIM role that wasn't active), so only the \($scope.subscriptions) subscription(s) it could see are covered. Re-run with the role active.",
       ""

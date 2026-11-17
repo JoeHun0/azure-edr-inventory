@@ -95,6 +95,7 @@ S="$WORK/sum"
 bash "$SUM" -o "$S" "$WORK/out" 2>"$WORK/sumlog" && ok "summary exits 0" || { bad "summary exits 0"; cat "$WORK/sumlog"; }
 R="$S/edr-report.md"; C="$S/edr-worklist.csv"
 line() { if grep -qF -- "$2" "$3"; then ok "$1"; else bad "$1"; fi; }
+line "report: data caveat at the top"  "> **About this data:** these numbers come straight from Azure Resource Graph" "$R"
 line "report: machine counts"      "Machines: **11** (7 VMs, 2 scale sets, 2 Arc machines), of which active: **8**." "$R"
 line "report: coverage"            "| Protected (EDR present) | 4 of 11 (36%) | 3 of 8 (38%) | 3 of 7 (43%) |" "$R"
 line "report: risk table"          "| CRITICAL | 2 | 2 | 2 |" "$R"
