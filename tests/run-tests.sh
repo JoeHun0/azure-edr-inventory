@@ -109,6 +109,13 @@ bash "$SUM" -s ';' -o "$WORK/sum2" "$WORK/out" 2>/dev/null
 line "-s ';' separator"            '"CRITICAL";"1";"EDR-CRITICAL"' "$WORK/sum2/edr-worklist.csv"
 if ! bash "$SUM" "$WORK/nonexistent" >/dev/null 2>&1; then ok "rejects a folder without inventory"; else bad "rejects a folder without inventory"; fi
 
+echo "edr-summary.sh at scale"
+mkdir -p "$WORK/big/raw"
+jq -c 'range(0; 1000) as $i | . + {id: "\(.id)-\($i)", name: "\(.name)-\($i)"}' "$WORK/out/raw/model.jsonl" > "$WORK/big/raw/model.jsonl"
+cp "$WORK/out/subscriptions.tsv" "$WORK/big/"
+if bash "$SUM" "$WORK/big" >/dev/null 2>"$WORK/biglog"; then ok "11 000 machines: no 'argument list too long'"; else bad "11 000 machines: no 'argument list too long'"; cat "$WORK/biglog"; fi
+is "  ... all items written" "$(($(wc -l < "$WORK/big/edr-worklist.csv") - 1))" 9003
+
 echo "argument checks"
 if ! bash "$SCRIPT" -s not-a-guid >/dev/null 2>&1; then ok "rejects a malformed subscription ID"; else bad "rejects a malformed subscription ID"; fi
 if ! bash "$SCRIPT" -p "22,3389" >/dev/null 2>&1; then ok "rejects a malformed port list"; else bad "rejects a malformed port list"; fi

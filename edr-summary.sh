@@ -141,7 +141,8 @@ def risklabel: ["", "LOW", "MEDIUM", "HIGH", "CRITICAL"][.];
 def csvrow: map(if . == null then "" else tostring end
                 | if test("^[=+\\-@\t\r]") then "'" + . else . end   # no formulas in Excel
                 | gsub("\""; "\"\"") | "\"" + . + "\"") | join($sep);
-(["item_id", "severity", "priority", "category", "issue", "action", "kind", "machine", "subscription",
+. as $rows
+| (["item_id", "severity", "priority", "category", "issue", "action", "kind", "machine", "subscription",
   "subscription_id", "resource_group", "location", "os", "os_detail", "state", "protection",
   "defender_plan", "mde_integration", "public_ips", "open_ports", "aks_node_pool", "management_groups",
   "resource_id", "details", "detected"] | csvrow),
@@ -230,16 +231,20 @@ read -r -d '' JQ_REPORT <<'JQ'
   "## Worklist",
   "",
   "| Severity | Items |", "|---|---|",
-  ($items | map(.sev) | group_by(.) | reverse
+  ($items[0] | map(.sev) | group_by(.) | reverse
    | if length == 0 then "| (none) | |" else .[] | "| \(.[0] | risklabel) | \(length) |" end)
 JQ
 
 ARGS=(--slurpfile m "$DIR/raw/model.jsonl" --rawfile subs "$DIR/subscriptions.tsv" --arg detected "$DETECTED")
-ITEMS=$(jq -n -c "${ARGS[@]}" "$JQ_PRE $JQ_ROWS") || die "building the worklist failed"
-{ printf '\xEF\xBB\xBF'; jq -n -r --argjson rows "$ITEMS" --arg sep "$SEP" --arg detected "$DETECTED" "$JQ_CSV"; } \
+# The rows go through a file: as a command-line argument they would hit the OS limit
+# (128 KB per argument on Linux, 32 KB per command line on Windows).
+ITEMS=$(mktemp) || die "cannot create a temporary file"
+trap 'rm -f "$ITEMS"' EXIT
+jq -n -c "${ARGS[@]}" "$JQ_PRE $JQ_ROWS" > "$ITEMS" || die "building the worklist failed"
+{ printf '\xEF\xBB\xBF'; jq -r --arg sep "$SEP" --arg detected "$DETECTED" "$JQ_CSV" < "$ITEMS"; } \
   > "$OUT/edr-worklist.csv" || die "writing edr-worklist.csv failed"
-jq -n -r "${ARGS[@]}" --argjson items "$ITEMS" "$JQ_PRE $JQ_REPORT" > "$OUT/edr-report.md" \
+jq -n -r "${ARGS[@]}" --slurpfile items "$ITEMS" "$JQ_PRE $JQ_REPORT" > "$OUT/edr-report.md" \
   || die "building edr-report.md failed"
 
 printf 'edr-report.md     %s  (counts only - safe for the report)\n' "$OUT/edr-report.md" >&2
-printf 'edr-worklist.csv  %s  (%s items, with names and IPs - internal)\n' "$OUT/edr-worklist.csv" "$(jq -r 'length' <<<"$ITEMS")" >&2
+printf 'edr-worklist.csv  %s  (%s items, with names and IPs - internal)\n' "$OUT/edr-worklist.csv" "$(jq -r 'length' < "$ITEMS")" >&2
