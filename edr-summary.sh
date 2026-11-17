@@ -167,6 +167,12 @@ read -r -d '' JQ_REPORT <<'JQ'
   "",
   "Inventory of \($detected) (azure-edr-inventory). Counts only.",
   "",
+  ( if $scope.rootAccess == false then
+      "> **Warning: incomplete inventory.** The account that ran it couldn't read the tenant root management group (no Reader role there, or a PIM role that wasn't active), so only the \($scope.subscriptions) subscription(s) it could see are covered. Re-run with the role active.",
+      ""
+    elif $scope.subscriptionFilter == true then
+      "> Limited to selected subscriptions (`-s`).", ""
+    else empty end ),
   "Machines: **\($n)** (\($M | cnt(.kind == "VM")) VMs, \($M | cnt(.kind == "VMSS")) scale sets, \($M | cnt(.kind == "Arc")) Arc machines), of which active: **\($act | length)**.",
   "Subscriptions: **\($S | length)**.",
   "",
@@ -235,7 +241,9 @@ read -r -d '' JQ_REPORT <<'JQ'
    | if length == 0 then "| (none) | |" else .[] | "| \(.[0] | risklabel) | \(length) |" end)
 JQ
 
-ARGS=(--slurpfile m "$DIR/raw/model.jsonl" --rawfile subs "$DIR/subscriptions.tsv" --arg detected "$DETECTED")
+SCOPE=$(cat "$DIR/raw/scope.json" 2>/dev/null || echo '{}')   # absent in runs made before it existed
+ARGS=(--slurpfile m "$DIR/raw/model.jsonl" --rawfile subs "$DIR/subscriptions.tsv" --arg detected "$DETECTED"
+      --argjson scope "$SCOPE")
 # The rows go through a file: as a command-line argument they would hit the OS limit
 # (128 KB per argument on Linux, 32 KB per command line on Windows).
 ITEMS=$(mktemp) || die "cannot create a temporary file"

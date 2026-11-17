@@ -122,6 +122,9 @@ case "$args" in
         echo '{"name":"VirtualMachines","properties":{"pricingTier":"Free"}}' ;;
       */subscriptions/$S1/providers/Microsoft.Security/settings/WDATP*) echo true ;;
       */subscriptions/$S3/providers/Microsoft.Security/settings/WDATP*) echo false ;;
+      */providers/Microsoft.Management/managementGroups/*)
+        if [[ -n "${MOCK_NO_ROOT:-}" ]]; then echo "ERROR: (AuthorizationFailed) simulated" >&2; exit 1; fi
+        echo '{"name":"root"}' ;;
       *) echo "mock az: unhandled url $url" >&2; exit 1 ;;
     esac ;;
 

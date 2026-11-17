@@ -123,6 +123,17 @@ cp "$WORK/out/subscriptions.tsv" "$WORK/big/"
 if bash "$SUM" "$WORK/big" >/dev/null 2>"$WORK/biglog"; then ok "11 000 machines: no 'argument list too long'"; else bad "11 000 machines: no 'argument list too long'"; cat "$WORK/biglog"; fi
 is "  ... all items written" "$(($(wc -l < "$WORK/big/edr-worklist.csv") - 1))" 9003
 
+echo "tenant root access check"
+if ! grep -q "incomplete inventory" "$WORK/sum/edr-report.md"; then ok "full access: report has no warning"; else bad "full access: report has no warning"; fi
+MOCK_NO_ROOT=1 bash "$SCRIPT" -o "$WORK/noroot" 2>"$WORK/norootlog"
+if grep -q "can't read the tenant root management group" "$WORK/norootlog"; then ok "no root access: warning on screen"; else bad "no root access: warning on screen"; fi
+if grep -q "4 subscription(s) visible" "$WORK/norootlog"; then ok "subscription count shown"; else bad "subscription count shown"; fi
+bash "$SUM" "$WORK/noroot" 2>/dev/null
+if grep -q "Warning: incomplete inventory.*only the 4 subscription" "$WORK/noroot/edr-report.md"; then ok "no root access: warning in the report"; else bad "no root access: warning in the report"; fi
+MOCK_NO_ROOT=1 bash "$SCRIPT" -s 11111111-0000-0000-0000-000000000002 -o "$WORK/noroot-s" 2>"$WORK/norootlog2"
+if ! grep -q "tenant root" "$WORK/norootlog2"; then ok "-s: root access not required"; else bad "-s: root access not required"; fi
+if grep -q "plans: 1/1" "$WORK/log"; then ok "progress shown for per-subscription calls"; else bad "progress shown for per-subscription calls"; fi
+
 echo "argument checks"
 if ! bash "$SCRIPT" -s not-a-guid >/dev/null 2>&1; then ok "rejects a malformed subscription ID"; else bad "rejects a malformed subscription ID"; fi
 if ! bash "$SCRIPT" -p "22,3389" >/dev/null 2>&1; then ok "rejects a malformed port list"; else bad "rejects a malformed port list"; fi

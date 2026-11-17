@@ -92,6 +92,19 @@ mkdir -p "$RAW" || die "cannot create $RAW"
 
 ARM="https://management.azure.com"
 
+# Without read access at the tenant root management group (no Reader there, or a PIM role
+# that isn't active), Resource Graph silently returns only the subscriptions the account
+# can see. Check it, warn, and record it so the summary can flag an incomplete inventory.
+ROOT_ACCESS=true
+if ((${#SUBS[@]} == 0)) && ! az rest --method GET \
+     --url "$ARM/providers/Microsoft.Management/managementGroups/$TENANT_ID?api-version=2021-04-01" \
+     -o none --only-show-errors </dev/null >/dev/null 2>&1; then
+  ROOT_ACCESS=false
+  warn "Your account can't read the tenant root management group (no Reader role there, or a PIM role that"
+  warn "isn't active). Only the subscriptions you can see are covered. For a complete inventory, activate the"
+  warn "role, run 'az login' again and re-run."
+fi
+
 # Azure Resource Graph query over the whole tenant (root management group),
 # with paging; prints .data[] as JSON lines.
 arg_all() {
@@ -183,6 +196,11 @@ run_arg subnets "subnets" "resources
 | mv-expand subnet = properties.subnets
 | project id = tolower(tostring(subnet.id)), nsgId = tolower(tostring(subnet.properties.networkSecurityGroup.id))"
 
+NSUBS=$(wc -l < "$RAW/subs.jsonl" | tr -d ' ')
+log "$NSUBS subscription(s) visible."
+jq -n -c --argjson root "$ROOT_ACCESS" --argjson n "$NSUBS" --argjson filtered "$( ((${#SUBS[@]})) && echo true || echo false)" \
+  '{rootAccess: $root, subscriptions: $n, subscriptionFilter: $filtered}' > "$RAW/scope.json"
+
 # ---------------------------------------------------------------- 2. per-subscription Defender settings
 in_scope() {  # in_scope <subscriptionId>: true when no -s was given or it was given
   ((${#SUBS[@]} == 0)) && return 0
@@ -193,32 +211,43 @@ in_scope() {  # in_scope <subscriptionId>: true when no -s was given or it was g
 : > "$RAW/pricing_rest.jsonl"
 : > "$RAW/mde_settings.jsonl"
 mapfile -t ALL_SUBS < <(jq -r '.subscriptionId' "$RAW/subs.jsonl")
-missing=0
-for s in "${ALL_SUBS[@]}"; do
-  in_scope "$s" || continue
-  jq -e --arg s "$s" 'select(.subscriptionId == $s)' "$RAW/pricing.jsonl" >/dev/null && continue
-  missing=$((missing + 1))
+# progress <label> <done> <total>: a line every 25 calls and at the end
+progress() { (($2 % 25 == 0 || $2 == $3)) && log "  $1: $2/$3"; return 0; }
+
+MISSING=()
+while read -r s; do
+  in_scope "$s" && MISSING+=("$s")
+done < <(jq -r -n --slurpfile subs "$RAW/subs.jsonl" --slurpfile pr "$RAW/pricing.jsonl" \
+           '($pr | map(.subscriptionId | ascii_downcase)) as $have
+            | $subs[] | .subscriptionId | select((ascii_downcase | IN($have[])) | not)')
+missing=${#MISSING[@]}
+((missing)) && log "Reading the Defender plan directly for $missing subscription(s) missing from Resource Graph..."
+i=0
+for s in "${MISSING[@]}"; do
+  i=$((i + 1))
   az rest --method GET --url "$ARM/subscriptions/$s/providers/Microsoft.Security/pricings/VirtualMachines?api-version=2023-01-01" \
       -o json --only-show-errors </dev/null 2>/dev/null \
     | jq -c --arg s "$s" '{subscriptionId: $s, tier: .properties.pricingTier, subPlan: (.properties.subPlan // "")}' \
     >> "$RAW/pricing_rest.jsonl" || true
+  progress "plans" "$i" "$missing"
 done
-((missing)) && log "Defender plan read directly for $missing subscription(s) missing from Resource Graph."
 
 if ((SKIP_SETTINGS)); then
   log "Skipping Defender for Endpoint integration settings (-S)."
 else
   mapfile -t STD_SUBS < <(jq -r -s 'map(select(.tier == "Standard")) | .[].subscriptionId' \
                             "$RAW/pricing.jsonl" "$RAW/pricing_rest.jsonl" | sort -u)
+  TODO=()
+  for s in "${STD_SUBS[@]}"; do in_scope "$s" && TODO+=("$s"); done
+  ((${#TODO[@]})) && log "Reading the Defender for Endpoint integration setting for ${#TODO[@]} subscription(s) with Defender for Servers..."
   n=0
-  for s in "${STD_SUBS[@]}"; do
-    in_scope "$s" || continue
+  for s in "${TODO[@]}"; do
     n=$((n + 1))
     v=$(az rest --method GET --url "$ARM/subscriptions/$s/providers/Microsoft.Security/settings/WDATP?api-version=2022-05-01" \
           --query properties.enabled -o tsv --only-show-errors </dev/null 2>/dev/null) || v="unknown"
     jq -c -n --arg s "$s" --arg v "${v:-unknown}" '{subscriptionId: $s, mde: ($v | ascii_downcase)}' >> "$RAW/mde_settings.jsonl"
+    progress "settings" "$n" "${#TODO[@]}"
   done
-  log "Defender for Endpoint integration setting read for $n subscription(s) with Defender for Servers."
 fi
 
 # ---------------------------------------------------------------- 3. model

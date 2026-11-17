@@ -87,6 +87,9 @@ The `endpointProtection` column can show:
 - **Permissions:** **Reader** on the tenant root management group (or on every management group and
   subscription you want covered). Reading the Defender settings may need **Security Reader** in some
   tenants.
+  If the account can't read the tenant root management group, for example because a **PIM role isn't active**,
+  the script warns at the start and the summary report says the inventory is incomplete. Activate the role
+  and run `az login` again before you start.
 
 ## Usage
 
