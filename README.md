@@ -8,6 +8,32 @@ Azure Arc machines across every subscription, and sorts them by a rough risk rat
 ./azure-edr-inventory.sh          # whole tenant
 ```
 
+## Quick start
+
+1. Sign in with the Azure CLI and add the Resource Graph extension (once):
+   ```bash
+   az login
+   az extension add --name resource-graph
+   ```
+2. Run the inventory. It only reads. Expect a few minutes, even for large tenants:
+   ```bash
+   ./azure-edr-inventory.sh
+   ```
+   The results go to a new folder, `./edr-inventory-YYYYMMDD-HHMM/`.
+3. Turn the results into a report and a worklist:
+   ```bash
+   ./edr-summary.sh edr-inventory-YYYYMMDD-HHMM
+   ```
+4. Use the two files it writes into the folder:
+   - **`edr-report.md`**: counts only, with no names. Paste it into your report or ticket.
+   - **`edr-worklist.csv`**: one row per thing to fix, with severity, what to do and the details. Load it into
+     Excel (*Data → From Text/CSV*) and assign rows to the people who fix them.
+
+   Everything else in the folder (the `.tsv` files and `raw/`) is the detailed inventory. Keep it private.
+
+On Windows, run the scripts in **Git Bash** or **WSL** with the Azure CLI installed. Run them from a folder
+outside any git repository, so the results can't be committed by accident.
+
 ## Why
 
 A server without EDR is a blind spot. Nothing stops malware or ransomware on it, and the security team
@@ -91,6 +117,8 @@ They open directly in LibreOffice Calc or Excel.
 | `subscriptions.tsv` | One row per subscription: Defender for Servers tier and sub-plan, MDE integration, number of machines, active machines, unprotected, unprotected and active, machines with management ports open to the internet, critical machines, management groups |
 | `raw/` | The JSON lines the reports are built from, for your own queries with `jq` |
 
+For a shareable summary and a to-do list, run `edr-summary.sh` on the folder: see [Report and worklist](#report-and-worklist).
+
 ## Risk rating
 
 A **heuristic to sort by**, not a verdict. *Unprotected* means `NONE…`, `AV ONLY` or a failed MDE
@@ -154,6 +182,8 @@ Notes on the CSV:
 - **Separator:** `,` by default. Excel with a Hungarian or German locale expects `;` when you open the file by double-clicking, so use `-s ';'` for that.
 
 ## After the inventory
+
+The worklist (`edr-worklist.csv`, see [Report and worklist](#report-and-worklist)) contains these steps as one row per machine or subscription and issue, ready to assign.
 
 These are common next steps, roughly in order:
 
