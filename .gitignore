@@ -3,3 +3,5 @@ edr-inventory-*/
 *.tsv
 raw/
 *.jsonl
+edr-report.md
+edr-worklist.csv

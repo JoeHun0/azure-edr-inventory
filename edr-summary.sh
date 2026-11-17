@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
-# edr-summary.sh - turns an azure-edr-inventory output folder into a short summary in
-# Markdown: coverage, endpoint protection status, internet exposure, OS split, Defender
-# for Servers plans per subscription, and what to fix first.
+# edr-summary.sh - turns an azure-edr-inventory output folder into two files:
+#
+#   edr-report.md     counts only, no machine, subscription or management-group names
+#                     and no IP addresses - safe to put into a report: coverage,
+#                     protection status by OS, internet exposure, Defender for Servers
+#                     plans, what to fix first
+#   edr-worklist.csv  one row per thing to fix (machines and subscriptions), with names,
+#                     IPs, details and what to do - internal. item_id (category:resource ID
+#                     or subscription ID) stays the same between runs, so the file can feed
+#                     a tracking spreadsheet (Excel: Data > From Text/CSV) and statuses kept
+#                     there survive a refresh.
 #
 # Usage:
-#   ./edr-summary.sh <output folder>      counts only - safe to paste into a report
-#   ./edr-summary.sh -n <output folder>   also list the CRITICAL and HIGH machines and
-#                                         the subscriptions to fix (internal use)
+#   ./edr-summary.sh <output folder>           writes both files into that folder
+#   ./edr-summary.sh -o <dir> <output folder>  writes them into <dir> instead
+#   ./edr-summary.sh -s ';' <output folder>    CSV separator (default ","; use ";" if Excel
+#                                              with a Hungarian or German locale opens it)
 #
 # Reads raw/model.jsonl and subscriptions.tsv from the folder. Needs only jq; no Azure access.
 
@@ -18,10 +27,12 @@ set -uo pipefail
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; }
 
-NAMES=0
-while getopts ":nh" opt; do
+SEP=","
+OUT=""
+while getopts ":s:o:h" opt; do
   case "$opt" in
-    n) NAMES=1 ;;
+    s) SEP="$OPTARG" ;;
+    o) OUT="$OPTARG" ;;
     h) usage; exit 0 ;;
     *) echo "Unknown option. Use -h for help." >&2; exit 2 ;;
   esac
@@ -30,32 +41,130 @@ shift $((OPTIND - 1))
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 (($# == 1)) || die "give one azure-edr-inventory output folder (-h for help)"
+[[ "$SEP" == "," || "$SEP" == ";" || "$SEP" == $'\t' ]] || die "-s must be , or ; or a tab"
 DIR="$1"
 [[ -f "$DIR/raw/model.jsonl" && -s "$DIR/subscriptions.tsv" ]] \
   || die "$DIR/raw/model.jsonl or $DIR/subscriptions.tsv not found - is this an azure-edr-inventory output folder?"
 command -v jq >/dev/null || die "jq not found (sudo apt install jq)"
 jq() { command jq "$@" | tr -d '\r'; }   # Windows jq ends lines with CRLF
 
-jq -n -r --slurpfile m "$DIR/raw/model.jsonl" --rawfile subs "$DIR/subscriptions.tsv" \
-  --argjson names "$NAMES" --arg dir "$DIR" '
+OUT=${OUT:-$DIR}
+umask 077
+mkdir -p "$OUT" || die "cannot create $OUT"
+DETECTED=$(date -r "$DIR/raw/model.jsonl" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+
+# ---------------------------------------------------------------- shared jq
+read -r -d '' JQ_PRE <<'JQ'
 def risklabel: ["", "LOW", "MEDIUM", "HIGH", "CRITICAL"][.];
 def unprotected: startswith("NONE") or . == "AV ONLY" or test("failed");
 def pct($n; $of): if $of == 0 then "-" else "\(($n * 100 / $of) | round)%" end;
 def status: if startswith("OTHER EDR") then "OTHER EDR" else . end;
 def cnt(f): map(select(f)) | length;
+def num: tonumber? // 0;
 def os: (.osType // "unknown") | ascii_downcase | if . == "windows" then "Windows" elif . == "linux" then "Linux" else . end;
+def fix: if . == "NONE - Defender plan on, no sensor" then
+           "Defender for Servers is on but no sensor was deployed: check OS and kernel support and the MDE extension, or onboard the machine manually."
+         elif . == "NONE - Defender plan on, MDE integration off" then
+           "Turn on the Defender for Endpoint integration in the subscription's Defender for Servers settings."
+         elif . == "MDE - extension failed" then
+           "Fix the failed MDE extension (check its status and logs; often an unsupported OS or kernel) and redeploy it."
+         elif . == "AV ONLY" then
+           "Antivirus only: deploy an EDR (Defender for Endpoint or the company EDR)."
+         else
+           "Enable Defender for Servers on the subscription (through Azure Policy) or deploy the company EDR."
+         end;
 
 ($subs | split("\n") | map(select(length > 0) | split("\t"))) as $rows
 | ($rows[0]) as $h
 | [$rows[1:][] | [$h, .] | transpose | map({key: .[0], value: .[1]}) | from_entries] as $S
 | $m as $M
+JQ
+
+# ---------------------------------------------------------------- worklist rows
+read -r -d '' JQ_ROWS <<'JQ'
+| def item($sev; $cat; $issue; $action; $details):
+    {sev: $sev, cat: $cat, issue: $issue, action: $action, details: $details};
+  "First check the EDR console: agents installed without a VM extension (GPO, Intune, scripts) show as unprotected here." as $check
+| [ ( $M[] | . as $x
+      | ( (if .risk == 4 then
+             item(4; "EDR-CRITICAL"; "No EDR, running, and management ports open to the internet";
+               "Close the management ports now (Azure Bastion or just-in-time access), then deploy EDR and check the machine for signs of compromise.";
+               "\(.edr | fix) \($check)")
+           else empty end),
+          (if (.openPorts | length) > 0 and .risk != 4 then
+             item(3; "EDR-EXPOSED"; "Management ports open to the internet";
+               "Close the ports; use Azure Bastion or just-in-time VM access instead.";
+               (if (.edr | unprotected) then "Also unprotected: \(.edr | fix)" else "" end))
+           else empty end),
+          (if (.edr | unprotected) and .active and (.aks | not) and (.openPorts | length) == 0 then
+             item(3; "EDR-MISSING"; "No EDR on a running machine"; (.edr | fix); $check)
+           else empty end),
+          (if (.edr | unprotected) and ((.active | not) or .aks) and (.openPorts | length) == 0 then
+             (if .aks then
+                item(2; "EDR-AKS"; "AKS node pool without an EDR extension";
+                  "Confirm the cluster is covered by Defender for Containers; otherwise deploy the EDR through the node image or a DaemonSet.";
+                  "")
+              else
+                item(2; "EDR-MISSING-INACTIVE"; "No EDR on a stopped or disconnected machine";
+                  "Deploy the EDR before the machine is started or reconnected, or delete it if it's no longer needed.";
+                  (.edr | fix))
+              end)
+           else empty end),
+          (if (.edr | startswith("OTHER EDR")) then
+             item(1; "EDR-OTHER-VERIFY"; "Another vendor's EDR agent";
+               "Confirm the agent is healthy and reports to the SOC's console.";
+               "")
+           else empty end)
+        )
+      | . + {x: $x, kind: "machine"} ),
+    ( $S[]
+      | . as $s
+      | ( (if .defenderTier != "Standard" and (.unprotectedActive | num) > 0 then
+             item(3; "SUB-NO-DEFENDER"; "Defender for Servers off, with unprotected running machines";
+               "Enable Defender for Servers (P1; P2 for internet-facing and critical servers), preferably through Azure Policy at management-group level, or confirm the company EDR covers these machines.";
+               "Unprotected active machines: \(.unprotectedActive).")
+           else empty end),
+          (if .mdeIntegration == "false" then
+             item(3; "SUB-MDE-OFF"; "Defender for Servers on, but the Defender for Endpoint integration is off";
+               "Turn on the integration: Defender for Cloud > Environment settings > the subscription > Settings & monitoring.";
+               "Unprotected active machines: \(.unprotectedActive).")
+           else empty end)
+        )
+      | . + {s: $s, kind: "subscription"} )
+  ]
+| sort_by(-.sev, .cat, (.x.subscription // .s.subscription // ""), (.x.name // ""))
+JQ
+
+# ---------------------------------------------------------------- CSV
+read -r -d '' JQ_CSV <<'JQ'
+def risklabel: ["", "LOW", "MEDIUM", "HIGH", "CRITICAL"][.];
+def csvrow: map(if . == null then "" else tostring end
+                | if test("^[=+\\-@\t\r]") then "'" + . else . end   # no formulas in Excel
+                | gsub("\""; "\"\"") | "\"" + . + "\"") | join($sep);
+(["item_id", "severity", "priority", "category", "issue", "action", "kind", "machine", "subscription",
+  "subscription_id", "resource_group", "location", "os", "os_detail", "state", "protection",
+  "defender_plan", "mde_integration", "public_ips", "open_ports", "aks_node_pool", "management_groups",
+  "resource_id", "details", "detected"] | csvrow),
+($rows[] | if .kind == "machine" then .x as $x
+    | ["\(.cat):\($x.id | ascii_downcase)", (.sev | risklabel), (5 - .sev), .cat, .issue, .action, $x.kind,
+       $x.name, $x.subscription, $x.subscriptionId, $x.resourceGroup, $x.location, $x.osType, $x.osDetail,
+       $x.state, $x.edr, $x.plan, $x.mde, ($x.publicIps | join(", ")), ($x.openPorts | map(tostring) | join(", ")),
+       (if $x.aks then "yes" else "no" end), $x.mgPath, $x.id, .details, $detected]
+  else .s as $s
+    | ["\(.cat):\($s.subscriptionId)", (.sev | risklabel), (5 - .sev), .cat, .issue, .action, "Subscription",
+       "", $s.subscription, $s.subscriptionId, "", "", "", "", $s.state, "",
+       ("\($s.defenderTier) \($s.defenderSubPlan)" | rtrimstr(" ")), $s.mdeIntegration, "", "", "",
+       $s.managementGroups, "/subscriptions/\($s.subscriptionId)", .details, $detected]
+  end | csvrow)
+JQ
+
+# ---------------------------------------------------------------- report.md
+read -r -d '' JQ_REPORT <<'JQ'
 | ($M | length) as $n
 | ($M | map(select(.active))) as $act
-| ($M | map(select(.edr | unprotected))) as $unp
-| (
-  "# azure-edr-inventory summary",
+| "# Endpoint protection (EDR) on Azure servers",
   "",
-  "Source: `\($dir)`. Generated \(now | strftime("%Y-%m-%d %H:%M")) UTC.",
+  "Inventory of \($detected) (azure-edr-inventory). Counts only.",
   "",
   "Machines: **\($n)** (\($M | cnt(.kind == "VM")) VMs, \($M | cnt(.kind == "VMSS")) scale sets, \($M | cnt(.kind == "Arc")) Arc machines), of which active: **\($act | length)**.",
   "Subscriptions: **\($S | length)**.",
@@ -101,7 +210,7 @@ def os: (.osType // "unknown") | ascii_downcase | if . == "windows" then "Window
   "| Plan | Subscriptions | With machines | MDE integration off | Unprotected active machines |",
   "|---|---|---|---|---|",
   ( $S | group_by(if .defenderTier == "Standard" then "Standard \(.defenderSubPlan // "")" | rtrimstr(" ") else (.defenderTier // "unknown") end)[]
-    | "| \(if .[0].defenderTier == "Standard" then "Standard \(.[0].defenderSubPlan // "")" | rtrimstr(" ") else (.[0].defenderTier // "unknown") end) | \(length) | \(cnt((.machines | tonumber? // 0) > 0)) | \(cnt(.mdeIntegration == "false")) | \(map(.unprotectedActive | tonumber? // 0) | add) |" ),
+    | "| \(if .[0].defenderTier == "Standard" then "Standard \(.[0].defenderSubPlan // "")" | rtrimstr(" ") else (.[0].defenderTier // "unknown") end) | \(length) | \(cnt((.machines | num) > 0)) | \(cnt(.mdeIntegration == "false")) | \(map(.unprotectedActive | num) | add) |" ),
   "",
   "## Other",
   "",
@@ -114,24 +223,23 @@ def os: (.osType // "unknown") | ascii_downcase | if . == "windows" then "Window
   "",
   "1. CRITICAL machines (unprotected, running, management ports open to the internet): **\($M | cnt(.risk == 4))**. Close the ports (Bastion or JIT), deploy EDR, check for compromise.",
   "2. Other machines with management ports open to the internet: **\($M | cnt((.openPorts | length > 0) and (.risk != 4)))**. Close the ports.",
-  "3. Subscriptions without Defender for Servers that have unprotected active machines: **\($S | cnt(.defenderTier != "Standard" and ((.unprotectedActive | tonumber? // 0) > 0)))**. Subscriptions with the plan on but the MDE integration off: **\($S | cnt(.mdeIntegration == "false"))**. Enable both through Azure Policy at management-group level.",
+  "3. Subscriptions without Defender for Servers that have unprotected active machines: **\($S | cnt(.defenderTier != "Standard" and ((.unprotectedActive | num) > 0)))**. Subscriptions with the plan on but the MDE integration off: **\($S | cnt(.mdeIntegration == "false"))**. Enable both through Azure Policy at management-group level.",
   "",
   "Agents installed inside the OS without a VM extension (GPO, Intune, scripts) show as unprotected here. Check those machines against the EDR console before acting.",
-  ( if $names == 1 then
-      "",
-      "## CRITICAL and HIGH machines (internal - contains names and IPs)",
-      "",
-      "| Risk | Machine | Kind | Subscription | OS | Status | Public IPs | Open ports |",
-      "|---|---|---|---|---|---|---|---|",
-      ( $M | map(select(.risk >= 3)) | sort_by(-.risk, .subscription, .name)[]
-        | "| \(.risk | risklabel) | \(.name) | \(.kind) | \(.subscription) | \(os) | \(.edr) | \(.publicIps | join(", ")) | \(.openPorts | map(tostring) | join(", ")) |" ),
-      "",
-      "## Subscriptions to fix (internal - contains names)",
-      "",
-      "| Subscription | Defender plan | MDE integration | Unprotected active | Exposed | Critical |",
-      "|---|---|---|---|---|---|",
-      ( $S | map(select((.unprotectedActive | tonumber? // 0) > 0 or (.internetMgmtPortsOpen | tonumber? // 0) > 0))
-        | sort_by(-(.critical | tonumber? // 0), -(.unprotectedActive | tonumber? // 0))[]
-        | "| \(.subscription) | \("\(.defenderTier) \(.defenderSubPlan)" | rtrimstr(" ")) | \(.mdeIntegration) | \(.unprotectedActive) | \(.internetMgmtPortsOpen) | \(.critical) |" )
-    else empty end )
-)'
+  "",
+  "## Worklist",
+  "",
+  "| Severity | Items |", "|---|---|",
+  ($items | map(.sev) | group_by(.) | reverse
+   | if length == 0 then "| (none) | |" else .[] | "| \(.[0] | risklabel) | \(length) |" end)
+JQ
+
+ARGS=(--slurpfile m "$DIR/raw/model.jsonl" --rawfile subs "$DIR/subscriptions.tsv" --arg detected "$DETECTED")
+ITEMS=$(jq -n -c "${ARGS[@]}" "$JQ_PRE $JQ_ROWS") || die "building the worklist failed"
+{ printf '\xEF\xBB\xBF'; jq -n -r --argjson rows "$ITEMS" --arg sep "$SEP" --arg detected "$DETECTED" "$JQ_CSV"; } \
+  > "$OUT/edr-worklist.csv" || die "writing edr-worklist.csv failed"
+jq -n -r "${ARGS[@]}" --argjson items "$ITEMS" "$JQ_PRE $JQ_REPORT" > "$OUT/edr-report.md" \
+  || die "building edr-report.md failed"
+
+printf 'edr-report.md     %s  (counts only - safe for the report)\n' "$OUT/edr-report.md" >&2
+printf 'edr-worklist.csv  %s  (%s items, with names and IPs - internal)\n' "$OUT/edr-worklist.csv" "$(jq -r 'length' <<<"$ITEMS")" >&2

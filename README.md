@@ -131,27 +131,27 @@ Network Watcher, to confirm a finding.
   the exposure columns are empty.
 - Azure public cloud only.
 
-## Summary for reports
+## Report and worklist
 
-`edr-summary.sh` turns an output folder into a short Markdown summary. It needs only `jq`, no Azure
-access:
+`edr-summary.sh` turns an output folder into two files. It needs only `jq`, no Azure access:
 
 ```bash
-./edr-summary.sh edr-inventory-20261117-0930        # counts only
-./edr-summary.sh -n edr-inventory-20261117-0930     # plus CRITICAL/HIGH machines and subscriptions to fix
+./edr-summary.sh edr-inventory-20261117-0930             # writes both files into that folder
+./edr-summary.sh -s ';' edr-inventory-20261117-0930      # ";" as CSV separator
+./edr-summary.sh -o ~/reports edr-inventory-20261117-0930   # writes them somewhere else
 ```
 
-It shows:
-- coverage: protected share of all machines, of active machines, and of active machines excluding AKS
-- machines per risk level, and per endpoint protection status split into Windows and Linux
-- other EDR vendors found
-- internet exposure: public IPs and open management ports
-- Defender for Servers plans per subscription
-- a short "fix first" list
+| File | Contents | Share? |
+|---|---|---|
+| `edr-report.md` | Counts only: coverage, protection status by OS, internet exposure, Defender for Servers plans, a fix-first list | Yes. No names, IDs or IP addresses, so it can go into a report or ticket |
+| `edr-worklist.csv` | One row per thing to fix, with severity, priority (1 = most urgent), category, issue, the action to take, and the details needed to do it: machine, subscription and its ID, resource group, location, OS, state, protection status, Defender plan, MDE integration, public IPs, open management ports, AKS node pool, management groups, resource ID | Internal only. Share single rows with the people who fix them |
 
-**Without `-n`, the summary contains no machine, subscription or management-group names and no IP
-addresses**, so it can go into a report or ticket. With `-n` it lists the CRITICAL and HIGH machines
-(with public IPs) and the subscriptions to fix. Treat that version like the inventory itself.
+Worklist categories: `EDR-CRITICAL` (unprotected, running, ports open to the internet), `EDR-EXPOSED`, `EDR-MISSING`, `EDR-MISSING-INACTIVE`, `EDR-AKS`, `EDR-OTHER-VERIFY` (another vendor's agent: confirm it reports to the SOC), and per subscription `SUB-NO-DEFENDER` and `SUB-MDE-OFF`.
+
+Notes on the CSV:
+- **`item_id` (category:resource ID or subscription ID) stays the same between runs.** Use it as the key in a tracking spreadsheet: load the CSV with *Data → From Text/CSV* (Power Query), keep columns like assignee, status and due date in a separate table joined on `item_id`, and refresh after the next run. Fixed items drop out of the CSV.
+- **Encoding:** UTF-8 with a byte-order mark, so Excel shows accented characters correctly. Values that start with `=`, `+`, `-` or `@` get a leading `'`, so names can't run as Excel formulas.
+- **Separator:** `,` by default. Excel with a Hungarian or German locale expects `;` when you open the file by double-clicking, so use `-s ';'` for that.
 
 ## After the inventory
 
