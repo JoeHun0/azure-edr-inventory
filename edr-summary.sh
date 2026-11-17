@@ -259,9 +259,9 @@ read -r -d '' JQ_REPORT <<'JQ'
       "| Status | Clusters | Node pools |", "|---|---|---|",
       ( $aks | group_by(.status) | sort_by(-length)[] | "| \(.[0].status) | \(length) | \(map(.nodePools) | add) |" ),
       "",
-      ( [$aks[] | .subscriptionId | ascii_downcase] | unique | length ) as $as
+      ( [$aks[] | .subscriptionId | ascii_downcase] | unique | length ) as $withAks
       | ( [$aks[] | select(.containersPlan != "Standard") | .subscriptionId | ascii_downcase] | unique | length ) as $off
-      | "- Subscriptions with AKS clusters: **\($as)**, of which without Defender for Containers: **\($off)**",
+      | "- Subscriptions with AKS clusters: **\($withAks)**, of which without Defender for Containers: **\($off)**",
       "- Orphaned AKS node pools (the scale set carries AKS's node-pool tag, but its cluster no longer exists): **\($M | cnt(.edr == "NONE - orphaned AKS node pool"))**",
       ""
     else empty end ),
