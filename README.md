@@ -56,6 +56,7 @@ For every **VM, VM scale set and Azure Arc machine** in every subscription:
 | **Endpoint protection** | Microsoft Defender for Endpoint (`MDE.Windows` / `MDE.Linux` extension, including failed installs), other EDR vendors deployed as extensions (CrowdStrike, SentinelOne, Trend Micro, Sophos, …), or Microsoft Antimalware only |
 | **Subscription plan** | Microsoft Defender for Servers tier (Free / Plan 1 / Plan 2) and whether its Defender for Endpoint integration (`WDATP` setting) is on |
 | **Internet exposure** (VMs) | public IPs, and which management ports (default 22, 3389, 5985, 5986) the NIC and subnet NSGs leave open to the internet |
+| **AKS** | for every AKS cluster: whether the subscription has the Microsoft Defender for Containers plan on and the cluster runs the Defender sensor. Each node pool (a scale set in the cluster's node resource group) gets its cluster's status |
 
 The `endpointProtection` column can show:
 
@@ -68,6 +69,10 @@ The `endpointProtection` column can show:
 | `NONE - Defender plan on, no sensor` | Defender for Servers is on, but no sensor was deployed (unsupported OS, VM off during rollout, provisioning error) |
 | `NONE - Defender plan on, MDE integration off` | The plan is paid for, but the Defender for Endpoint integration is switched off, so nothing gets deployed |
 | `NONE` | No plan and no agent |
+| `DEFENDER FOR CONTAINERS` | AKS node pool whose cluster is covered: Containers plan on and sensor deployed (AKS nodes are protected by Defender for Containers, not Defender for Servers) |
+| `NONE - Containers plan on, no sensor` | AKS node pool: the plan is on, but the Defender sensor isn't deployed to the cluster |
+| `NONE - no Defender for Containers` | AKS node pool: the subscription doesn't have the Defender for Containers plan |
+| `NONE - AKS cluster not found` | AKS node pool whose cluster isn't visible (another subscription, or no access) |
 
 ## Safety
 
@@ -117,8 +122,9 @@ They open directly in LibreOffice Calc or Excel.
 
 | File | Contents |
 |---|---|
-| `machines.tsv` | One row per machine, highest risk first: kind, name, subscription, resource group, location, OS, OS detail, state, endpoint protection, security extensions, Defender plan, MDE integration, public IPs, management ports open to the internet, AKS node pool, management groups |
-| `subscriptions.tsv` | One row per subscription: Defender for Servers tier and sub-plan, MDE integration, number of machines, active machines, unprotected, unprotected and active, machines with management ports open to the internet, critical machines, management groups |
+| `machines.tsv` | One row per machine, highest risk first: kind, name, subscription, resource group, location, OS, OS detail, state, endpoint protection, security extensions, Defender plan, MDE integration, public IPs, management ports open to the internet, AKS node pool, management groups, AKS cluster |
+| `subscriptions.tsv` | One row per subscription: Defender for Servers tier and sub-plan, MDE integration, number of machines, active machines, unprotected, unprotected and active, machines with management ports open to the internet, critical machines, management groups, Defender for Containers tier, AKS clusters, AKS clusters not covered |
+| `aks_clusters.tsv` | One row per AKS cluster, uncovered first: subscription, resource group, location, Kubernetes version, power state, Defender for Containers plan, automatic sensor provisioning in the plan, sensor on the cluster, status, number of node pools, management groups |
 | `raw/` | The JSON lines the reports are built from, for your own queries with `jq` |
 
 For a shareable summary and a to-do list, run `edr-summary.sh` on the folder: see [Report and worklist](#report-and-worklist).
@@ -137,8 +143,8 @@ state.
 | Rating | Condition |
 |---|---|
 | **CRITICAL** | Unprotected, active, **and** management ports open to the internet |
-| **HIGH** | Management ports open to the internet (even if protected), or unprotected and active (except AKS node pools) |
-| **MEDIUM** | Unprotected but not active (deallocated, scaled to 0, disconnected), or an unprotected AKS node pool (AKS nodes are usually covered by Defender for Containers instead) |
+| **HIGH** | Management ports open to the internet (even if protected), or unprotected and active (an AKS node pool counts as protected when its cluster is covered by Defender for Containers) |
+| **MEDIUM** | Unprotected but not active (deallocated, scaled to 0, disconnected) |
 | **LOW** | Protected, not exposed |
 
 ### How internet exposure is evaluated
@@ -162,7 +168,8 @@ Network Watcher, to confirm a finding.
   console. Defender for Endpoint onboarded by script also appears as `NONE`, but shows up in the Defender
   portal.
 - An installed extension doesn't prove a **healthy, reporting** sensor. Check sensor health in your EDR
-  console.
+  console. For AKS the same goes for the Defender sensor: "on" in the cluster's settings doesn't prove
+  that the sensor pods run.
 - Defender for Servers set at **resource level** (per VM) instead of per subscription isn't read.
 - Exposure is evaluated for VMs only. For scale sets and Arc machines (whose network is outside Azure),
   the exposure columns are empty.
@@ -183,7 +190,7 @@ Network Watcher, to confirm a finding.
 | `edr-report.md` | Counts only: coverage, protection status by OS, internet exposure, Defender for Servers plans, a fix-first list | Yes. No names, IDs or IP addresses, so it can go into a report or ticket |
 | `edr-worklist.csv` | One row per thing to fix, with severity, priority (1 = most urgent), category, issue, the action to take, and the details needed to do it: machine, subscription and its ID, resource group, location, OS, state, protection status, Defender plan, MDE integration, public IPs, open management ports, AKS node pool, management groups, resource ID | Internal only. Share single rows with the people who fix them |
 
-Worklist categories: `EDR-CRITICAL` (unprotected, running, ports open to the internet), `EDR-EXPOSED`, `EDR-MISSING`, `EDR-MISSING-INACTIVE`, `EDR-AKS`, `EDR-OTHER-VERIFY` (another vendor's agent: confirm it reports to the SOC), and per subscription `SUB-NO-DEFENDER` and `SUB-MDE-OFF`.
+Worklist categories: `EDR-CRITICAL` (unprotected, running, ports open to the internet), `EDR-EXPOSED`, `EDR-MISSING`, `EDR-MISSING-INACTIVE`, `EDR-AKS` (node pool whose cluster wasn't found), `EDR-OTHER-VERIFY` (another vendor's agent: confirm it reports to the SOC), per AKS cluster `AKS-NO-CONTAINERS` and `AKS-SENSOR-OFF`, and per subscription `SUB-NO-DEFENDER` and `SUB-MDE-OFF`.
 
 Notes on the CSV:
 - **`item_id` (category:resource ID or subscription ID) stays the same between runs.** Use it as the key in a tracking spreadsheet: load the CSV with *Data → From Text/CSV* (Power Query), keep columns like assignee, status and due date in a separate table joined on `item_id`, and refresh after the next run. Fixed items drop out of the CSV.

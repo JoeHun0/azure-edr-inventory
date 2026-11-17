@@ -10,6 +10,9 @@
 #     whether its Defender for Endpoint integration is switched on
 #   * internet exposure: public IPs and NSG rules that open management ports
 #     (default 22, 3389, 5985, 5986) to the internet
+#   * AKS: whether each cluster is covered by Microsoft Defender for Containers
+#     (plan on for the subscription, sensor on for the cluster); node pools get
+#     their cluster's status
 # and a risk rating per machine (a heuristic - verify by hand).
 #
 # Only read operations are used (az graph query, az rest --method GET).
@@ -32,7 +35,8 @@
 #
 # Output (tab-separated, opens in LibreOffice Calc / Excel):
 #   machines.tsv       one row per machine, highest risk first
-#   subscriptions.tsv  Defender for Servers plan and coverage per subscription
+#   subscriptions.tsv  Defender for Servers / Containers plans and coverage per subscription
+#   aks_clusters.tsv   one row per AKS cluster: Defender for Containers plan and sensor
 #   raw/               the raw JSON lines the reports are built from
 # The output lists unprotected and internet-exposed servers: keep it private.
 
@@ -166,6 +170,18 @@ run_arg vmss "virtual machine scale sets" "resources
           extensions = properties.virtualMachineProfile.extensionProfile.extensions,
           aks = isnotempty(tostring(tags['aks-managed-poolName'])) or tolower(resourceGroup) startswith 'mc_'"
 
+run_arg cpricing "Defender for Containers plans" "securityresources
+| where type =~ 'microsoft.security/pricings' and name =~ 'Containers'
+| project subscriptionId, tier = tostring(properties.pricingTier), extensions = properties.extensions"
+
+run_arg aks "AKS clusters" "resources
+| where type =~ 'microsoft.containerservice/managedclusters'
+| project id = tolower(id), name, subscriptionId, resourceGroup, location,
+          nodeRg = tolower(tostring(properties.nodeResourceGroup)),
+          version = tostring(properties.currentKubernetesVersion),
+          power = tostring(properties.powerState.code),
+          sensor = tostring(properties.securityProfile.defender.securityMonitoring.enabled)"
+
 run_arg arc "Azure Arc machines" "resources
 | where type =~ 'microsoft.hybridcompute/machines'
 | project id = tolower(id), name, subscriptionId, resourceGroup, location,
@@ -209,6 +225,7 @@ in_scope() {  # in_scope <subscriptionId>: true when no -s was given or it was g
 }
 
 : > "$RAW/pricing_rest.jsonl"
+: > "$RAW/cpricing_rest.jsonl"
 : > "$RAW/mde_settings.jsonl"
 mapfile -t ALL_SUBS < <(jq -r '.subscriptionId' "$RAW/subs.jsonl")
 # progress <label> <done> <total>: a line every 25 calls and at the end
@@ -231,6 +248,27 @@ for s in "${MISSING[@]}"; do
     >> "$RAW/pricing_rest.jsonl" || true
   progress "plans" "$i" "$missing"
 done
+
+# Defender for Containers plan, read directly where Resource Graph didn't return it
+# (only subscriptions that contain AKS clusters matter)
+CMISSING=()
+while read -r s; do
+  in_scope "$s" && CMISSING+=("$s")
+done < <(jq -r -n --slurpfile aks "$RAW/aks.jsonl" --slurpfile cp "$RAW/cpricing.jsonl" \
+           '($cp | map(.subscriptionId | ascii_downcase)) as $have
+            | [$aks[] | .subscriptionId | ascii_downcase] | unique[] | select(IN($have[]) | not)')
+if ((${#CMISSING[@]})); then
+  log "Reading the Defender for Containers plan directly for ${#CMISSING[@]} subscription(s) with AKS clusters..."
+  i=0
+  for s in "${CMISSING[@]}"; do
+    i=$((i + 1))
+    az rest --method GET --url "$ARM/subscriptions/$s/providers/Microsoft.Security/pricings/Containers?api-version=2023-01-01" \
+        -o json --only-show-errors </dev/null 2>/dev/null \
+      | jq -c --arg s "$s" '{subscriptionId: $s, tier: .properties.pricingTier, extensions: (.properties.extensions // [])}' \
+      >> "$RAW/cpricing_rest.jsonl" || true
+    progress "containers plans" "$i" "${#CMISSING[@]}"
+  done
+fi
 
 if ((SKIP_SETTINGS)); then
   log "Skipping Defender for Endpoint integration settings (-S)."
@@ -303,17 +341,26 @@ def edr($exts; $plan; $mde; $other):
     elif ($plan.tier // "") == "Standard" then "NONE - Defender plan on, no sensor"
     else "NONE" end;
 
+# --- Defender for Containers: plan on for the subscription and sensor on for the cluster
+def containers_status($cp; $cl):
+  if $cl == null then "NONE - AKS cluster not found"
+  elif ($cp.tier // "") != "Standard" then "NONE - no Defender for Containers"
+  elif (($cl.sensor // "") | tostring | lc) == "true" then "DEFENDER FOR CONTAINERS"
+  else "NONE - Containers plan on, no sensor" end;
+
 def unprotected: startswith("NONE") or . == "AV ONLY" or test("failed");
 def risk: (.edr | unprotected) as $u | (.openPorts | length > 0) as $o
   | if $u and $o and .active then 4
     elif $o and .active then 3
-    elif $u and .active and (.aks | not) then 3
+    elif $u and .active then 3
     elif $u then 2
     else 1 end;
 def mgpath: [(. // [])[] | .displayName] | reverse | join(" / ");
 
 ($subs | bykey("subscriptionId")) as $subBy
 | (($pricing + $pricingRest) | bykey("subscriptionId")) as $planBy
+| (($cpricing + $cpricingRest) | bykey("subscriptionId")) as $cplanBy
+| ($aks | map({key: "\(.subscriptionId | lc)/\(.nodeRg)", value: .}) | from_entries) as $clusterBy
 | ($mdeSettings | bykey("subscriptionId")) as $mdeBy
 | (($vmext + $arcext) | group_by(.machineId) | map({key: .[0].machineId, value: .}) | from_entries) as $extBy
 | ($nics | bykey("id")) as $nicBy
@@ -340,11 +387,18 @@ def mgpath: [(. // [])[] | .displayName] | reverse | join(" / ");
 | ($mdeBy[.subscriptionId | lc].mde // (if $plan.tier == "Standard" then "unknown" else "n/a" end)) as $mde
 | (if .kind == "VM" then exposure(.nicIds; $nicBy; $pipBy; $nsgBy; $subnetBy; $ports)
    else {publicIps: [], openPorts: []} end) as $x
+| (if .aks then $clusterBy["\(.subscriptionId | lc)/\(.resourceGroup | lc)"] else null end) as $cl
+| edr(.exts; $plan; $mde; $other) as $agent
+# AKS nodes are covered by Defender for Containers, not Defender for Servers: unless a
+# node pool carries its own EDR extension, it gets its cluster's Containers status
+| (if .aks and ($agent | startswith("NONE") or . == "AV ONLY")
+   then containers_status($cplanBy[.subscriptionId | lc]; $cl) else $agent end) as $status
 | . + {subscription: ($subBy[.subscriptionId | lc].name // .subscriptionId),
        mgPath: ($subBy[.subscriptionId | lc].mgChain | mgpath),
        plan: (if $plan.tier == "Standard" then "Standard \($plan.subPlan // "")" else $plan.tier end),
        mde: $mde,
-       edr: edr(.exts; $plan; $mde; $other),
+       edr: $status,
+       aksCluster: ($cl.name // ""),
        securityExtensions: ([.exts[] | "\(.publisher).\(.extType)" | select(lc | test("mde\\.|antimalware|" + $other))] | unique | join(", ")),
        publicIps: $x.publicIps, openPorts: $x.openPorts}
 | . + {risk: risk}
@@ -358,34 +412,72 @@ jq -n -c \
   --slurpfile arc "$RAW/arc.jsonl" --slurpfile arcext "$RAW/arcext.jsonl" \
   --slurpfile nics "$RAW/nics.jsonl" --slurpfile pips "$RAW/pips.jsonl" \
   --slurpfile nsgs "$RAW/nsgs.jsonl" --slurpfile subnets "$RAW/subnets.jsonl" \
+  --slurpfile cpricing "$RAW/cpricing.jsonl" --slurpfile cpricingRest "$RAW/cpricing_rest.jsonl" \
+  --slurpfile aks "$RAW/aks.jsonl" \
   --argjson scope "$SUBS_JSON" --argjson ports "$PORTS_JSON" --arg other "$OTHER_EDR" \
   --argjson scheduled "$([[ $SCHEDULED == 1 ]] && echo true || echo false)" \
   "$JQ_MODEL" > "$RAW/model.jsonl" || die "report building failed (raw data kept in $RAW)"
 
+# one line per AKS cluster in scope, with its Defender for Containers coverage
+jq -n -c --slurpfile aks "$RAW/aks.jsonl" --slurpfile subs "$RAW/subs.jsonl" \
+  --slurpfile cpricing "$RAW/cpricing.jsonl" --slurpfile cpricingRest "$RAW/cpricing_rest.jsonl" \
+  --slurpfile m "$RAW/model.jsonl" --argjson scope "$SUBS_JSON" '
+  def lc: ascii_downcase;
+  def sensorOn: any((.extensions // [])[]; (.name // "") == "ContainerSensor" and (((.isEnabled // "") | tostring | lc) == "true"));
+  (($cpricing + $cpricingRest) | map({key: (.subscriptionId | lc), value: .}) | from_entries) as $cplanBy
+  | ($subs | map({key: (.subscriptionId | lc), value: .}) | from_entries) as $subBy
+  | $aks[]
+  | select(($scope | length) == 0 or (.subscriptionId | lc | IN($scope[])))
+  | . as $c | ($cplanBy[.subscriptionId | lc] // {tier: "unknown"}) as $cp
+  | [$m[] | select(.aks and .aksCluster == $c.name and (.subscriptionId | lc) == ($c.subscriptionId | lc))] as $pools
+  | {id, name, subscriptionId, subscription: ($subBy[.subscriptionId | lc].name // .subscriptionId),
+     resourceGroup, location, version, power: (.power // ""),
+     containersPlan: ($cp.tier // "unknown"), planSensorProvisioning: ($cp | sensorOn),
+     clusterSensor: (((.sensor // "") | tostring | lc) == "true"),
+     status: (if ($cp.tier // "") != "Standard" then "NONE - no Defender for Containers"
+              elif (((.sensor // "") | tostring | lc) == "true") then "DEFENDER FOR CONTAINERS"
+              else "NONE - Containers plan on, no sensor" end),
+     nodePools: ($pools | length),
+     mgPath: ([($subBy[.subscriptionId | lc].mgChain // [])[] | .displayName] | reverse | join(" / "))}' \
+  > "$RAW/aks_model.jsonl" || warn "AKS cluster report failed"
+
 # ---------------------------------------------------------------- 4. reports
 JQ_LABEL='def risklabel: ["", "LOW", "MEDIUM", "HIGH", "CRITICAL"][.];'
+
+jq -r -s '
+  (["cluster", "subscription", "subscriptionId", "resourceGroup", "location", "kubernetesVersion", "powerState",
+    "containersPlan", "planSensorProvisioning", "clusterSensor", "status", "nodePools", "managementGroups"] | @tsv),
+  (sort_by((if .status == "DEFENDER FOR CONTAINERS" then 1 else 0 end), .subscription, .name)[]
+   | [.name, .subscription, .subscriptionId, .resourceGroup, .location, .version, .power, .containersPlan,
+      .planSensorProvisioning, .clusterSensor, .status, .nodePools, .mgPath] | @tsv)' \
+  "$RAW/aks_model.jsonl" > "$OUTDIR/aks_clusters.tsv"
 
 jq -r -s "$JQ_LABEL"'
   (["risk", "kind", "machine", "subscription", "subscriptionId", "resourceGroup", "location", "os", "osDetail",
     "state", "endpointProtection", "securityExtensions", "defenderPlan", "mdeIntegration", "publicIps",
-    "mgmtPortsOpenToInternet", "aksNodePool", "managementGroups"] | @tsv),
+    "mgmtPortsOpenToInternet", "aksNodePool", "managementGroups", "aksCluster"] | @tsv),
   (sort_by(-.risk, .subscription, .name)[]
    | [(.risk | risklabel), .kind, .name, .subscription, .subscriptionId, .resourceGroup, .location, .osType,
       (.osDetail | gsub("^ +| +$"; "")), .state, .edr, .securityExtensions, .plan, .mde,
-      (.publicIps | join(", ")), (.openPorts | map(tostring) | join(", ")), (if .aks then "yes" else "" end), .mgPath]
+      (.publicIps | join(", ")), (.openPorts | map(tostring) | join(", ")), (if .aks then "yes" else "" end), .mgPath,
+      (.aksCluster // "")]
    | @tsv)' "$RAW/model.jsonl" > "$OUTDIR/machines.tsv"
 
 jq -r -n --slurpfile m "$RAW/model.jsonl" --slurpfile subs "$RAW/subs.jsonl" \
   --slurpfile pricing "$RAW/pricing.jsonl" --slurpfile pricingRest "$RAW/pricing_rest.jsonl" \
-  --slurpfile mdeSettings "$RAW/mde_settings.jsonl" --argjson scope "$SUBS_JSON" '
+  --slurpfile mdeSettings "$RAW/mde_settings.jsonl" --argjson scope "$SUBS_JSON" \
+  --slurpfile cpricing "$RAW/cpricing.jsonl" --slurpfile cpricingRest "$RAW/cpricing_rest.jsonl" \
+  --slurpfile aksm "$RAW/aks_model.jsonl" '
   def lc: ascii_downcase;
   def unprotected: startswith("NONE") or . == "AV ONLY" or test("failed");
   (($pricing + $pricingRest) | map({key: (.subscriptionId | lc), value: .}) | from_entries) as $planBy
   | ($mdeSettings | map({key: (.subscriptionId | lc), value: .mde}) | from_entries) as $mdeBy
   | ($m | group_by(.subscriptionId | lc) | map({key: (.[0].subscriptionId | lc), value: .}) | from_entries) as $mBy
+  | (($cpricing + $cpricingRest) | map({key: (.subscriptionId | lc), value: .tier}) | from_entries) as $cpBy
+  | ($aksm | group_by(.subscriptionId | lc) | map({key: (.[0].subscriptionId | lc), value: .}) | from_entries) as $aBy
   | (["subscription", "subscriptionId", "state", "defenderTier", "defenderSubPlan", "mdeIntegration",
       "machines", "activeMachines", "unprotected", "unprotectedActive", "internetMgmtPortsOpen", "critical",
-      "managementGroups"] | @tsv),
+      "managementGroups", "containersTier", "aksClusters", "aksClustersUncovered"] | @tsv),
     ($subs | sort_by(.name | lc)[]
      | select(($scope | length) == 0 or (.subscriptionId | lc | IN($scope[])))
      | (.subscriptionId | lc) as $k | ($mBy[$k] // []) as $ms | ($planBy[$k] // {}) as $p
@@ -395,11 +487,17 @@ jq -r -n --slurpfile m "$RAW/model.jsonl" --slurpfile subs "$RAW/subs.jsonl" \
         ([$ms[] | select(.active and (.edr | unprotected))] | length),
         ([$ms[] | select(.openPorts | length > 0)] | length),
         ([$ms[] | select(.risk == 4)] | length),
-        ([(.mgChain // [])[] | .displayName] | reverse | join(" / "))]
+        ([(.mgChain // [])[] | .displayName] | reverse | join(" / ")),
+        ($cpBy[$k] // (if (($aBy[$k] // []) | length) == 0 then "n/a" else "unknown" end)), (($aBy[$k] // []) | length),
+        (($aBy[$k] // []) | map(select(.status != "DEFENDER FOR CONTAINERS")) | length)]
      | @tsv)' > "$OUTDIR/subscriptions.tsv"
 
 log "Done. Machines by endpoint protection:"
 jq -r -s 'group_by(.edr | sub(":.*"; "")) | sort_by(-length)[] | "  \(.[0].edr | sub(":.*"; "")): \(length)"' "$RAW/model.jsonl" >&2
+if [[ -s "$RAW/aks_model.jsonl" ]]; then
+  log "AKS clusters by Defender for Containers status:"
+  jq -r -s 'group_by(.status) | sort_by(-length)[] | "  \(.[0].status): \(length)"' "$RAW/aks_model.jsonl" >&2
+fi
 log "Machines by risk:"
 jq -r -s "$JQ_LABEL"'group_by(.risk) | reverse[] | "  \(.[0].risk | risklabel): \(length)"' "$RAW/model.jsonl" >&2
 log "Reports in $OUTDIR (keep them private)."

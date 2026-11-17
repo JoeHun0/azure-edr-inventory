@@ -101,9 +101,13 @@ read -r -d '' JQ_ROWS <<'JQ'
            else empty end),
           (if (.edr | unprotected) and ((.active | not) or .aks) and (.openPorts | length) == 0 then
              (if .aks then
-                item(2; "EDR-AKS"; "AKS node pool without an EDR extension";
-                  "Confirm the cluster is covered by Defender for Containers; otherwise deploy the EDR through the node image or a DaemonSet.";
-                  "")
+                # covered by the per-cluster items below, except where the cluster wasn't found
+                # (or the run is older than the Defender for Containers check)
+                (if ($aks | length) == 0 or .edr == "NONE - AKS cluster not found" then
+                   item(2; "EDR-AKS"; "AKS node pool without Defender for Containers coverage";
+                     "Find the node pool's AKS cluster and check that Defender for Containers covers it (plan on for the subscription, sensor on for the cluster).";
+                     "")
+                 else empty end)
               else
                 item(2; "EDR-MISSING-INACTIVE"; "No EDR on a stopped or disconnected machine";
                   "Deploy the EDR before the machine is started or reconnected, or delete it if it's no longer needed.";
@@ -130,9 +134,21 @@ read -r -d '' JQ_ROWS <<'JQ'
                "Unprotected active machines: \(.unprotectedActive).")
            else empty end)
         )
-      | . + {s: $s, kind: "subscription"} )
+      | . + {s: $s, kind: "subscription"} ),
+    ( $aks[] | select(.status != "DEFENDER FOR CONTAINERS") | . as $c
+      | (if ((.power // "") | ascii_downcase) == "stopped" then 2 else 3 end) as $sev
+      | (if .status == "NONE - no Defender for Containers" then
+           item($sev; "AKS-NO-CONTAINERS"; "AKS cluster without Defender for Containers";
+             "Enable Defender for Containers on the subscription (preferably through Azure Policy at management-group level) with automatic sensor provisioning, then check that the sensor runs on the cluster.";
+             "Node pools: \(.nodePools).")
+         else
+           item($sev; "AKS-SENSOR-OFF"; "Defender for Containers is on, but the sensor isn't deployed to the cluster";
+             "Enable the Defender sensor on the cluster (az aks update --enable-defender, or automatic sensor provisioning in the plan settings) and check that the sensor pods run.";
+             "Automatic sensor provisioning in the plan: \(if .planSensorProvisioning then "on" else "off" end). Node pools: \(.nodePools).")
+         end)
+      | . + {c: $c, kind: "cluster"} )
   ]
-| sort_by(-.sev, .cat, (.x.subscription // .s.subscription // ""), (.x.name // ""))
+| sort_by(-.sev, .cat, (.x.subscription // .s.subscription // .c.subscription // ""), (.x.name // .c.name // ""))
 JQ
 
 # ---------------------------------------------------------------- CSV
@@ -151,6 +167,10 @@ def csvrow: map(if . == null then "" else tostring end
        $x.name, $x.subscription, $x.subscriptionId, $x.resourceGroup, $x.location, $x.osType, $x.osDetail,
        $x.state, $x.edr, $x.plan, $x.mde, ($x.publicIps | join(", ")), ($x.openPorts | map(tostring) | join(", ")),
        (if $x.aks then "yes" else "no" end), $x.mgPath, $x.id, .details, $detected]
+  elif .kind == "cluster" then .c as $c
+    | ["\(.cat):\($c.id | ascii_downcase)", (.sev | risklabel), (5 - .sev), .cat, .issue, .action, "AKS cluster",
+       $c.name, $c.subscription, $c.subscriptionId, $c.resourceGroup, $c.location, "", "Kubernetes \($c.version)",
+       $c.power, $c.status, "Containers: \($c.containersPlan)", "", "", "", "", $c.mgPath, $c.id, .details, $detected]
   else .s as $s
     | ["\(.cat):\($s.subscriptionId)", (.sev | risklabel), (5 - .sev), .cat, .issue, .action, "Subscription",
        "", $s.subscription, $s.subscriptionId, "", "", "", "", $s.state, "",
@@ -227,9 +247,27 @@ read -r -d '' JQ_REPORT <<'JQ'
   ( $S | group_by(if .defenderTier == "Standard" then "Standard \(.defenderSubPlan // "")" | rtrimstr(" ") else (.defenderTier // "unknown") end)[]
     | "| \(if .[0].defenderTier == "Standard" then "Standard \(.[0].defenderSubPlan // "")" | rtrimstr(" ") else (.[0].defenderTier // "unknown") end) | \(length) | \(cnt((.machines | num) > 0)) | \(cnt(.mdeIntegration == "false")) | \(map(.unprotectedActive | num) | add) |" ),
   "",
+  ( if ($aks | length) > 0 then
+      "## Defender for Containers (AKS)",
+      "",
+      "AKS nodes are protected by Defender for Containers, not Defender for Servers: the plan has to be on for the subscription and the sensor deployed to the cluster.",
+      "",
+      "| Status | Clusters | Node pools |", "|---|---|---|",
+      ( $aks | group_by(.status) | sort_by(-length)[] | "| \(.[0].status) | \(length) | \(map(.nodePools) | add) |" ),
+      "",
+      ( [$aks[] | .subscriptionId | ascii_downcase] | unique | length ) as $as
+      | ( [$aks[] | select(.containersPlan != "Standard") | .subscriptionId | ascii_downcase] | unique | length ) as $off
+      | "- Subscriptions with AKS clusters: **\($as)**, of which without Defender for Containers: **\($off)**",
+      "- Node pools whose cluster wasn't found: **\($M | cnt(.edr == "NONE - AKS cluster not found"))**",
+      ""
+    else empty end ),
   "## Other",
   "",
-  "- Unprotected AKS node pools: **\($M | cnt(.aks and (.edr | unprotected)))** (usually covered by Defender for Containers instead)",
+  ( if ($aks | length) > 0 then
+      "- AKS node pools without Defender for Containers coverage: **\($M | cnt(.aks and (.edr | unprotected)))** of \($M | cnt(.aks))"
+    else
+      "- Unprotected AKS node pools: **\($M | cnt(.aks and (.edr | unprotected)))** (Defender for Containers coverage not checked in this run)"
+    end ),
   "- Arc machines not connected: **\($M | cnt(.kind == "Arc" and (.active | not)))**",
   "- Failed MDE extensions: **\($M | cnt(.edr | test("failed")))**",
   "- Machines only on antivirus (Microsoft Antimalware, no EDR): **\($M | cnt(.edr == "AV ONLY"))**",
@@ -239,6 +277,9 @@ read -r -d '' JQ_REPORT <<'JQ'
   "1. CRITICAL machines (unprotected, running, management ports open to the internet): **\($M | cnt(.risk == 4))**. Close the ports (Bastion or JIT), deploy EDR, check for compromise.",
   "2. Other machines with management ports open to the internet: **\($M | cnt((.openPorts | length > 0) and (.risk != 4)))**. Close the ports.",
   "3. Subscriptions without Defender for Servers that have unprotected active machines: **\($S | cnt(.defenderTier != "Standard" and ((.unprotectedActive | num) > 0)))**. Subscriptions with the plan on but the MDE integration off: **\($S | cnt(.mdeIntegration == "false"))**. Enable both through Azure Policy at management-group level.",
+  ( if ($aks | length) > 0 then
+      "4. AKS clusters not covered by Defender for Containers: **\($aks | cnt(.status != "DEFENDER FOR CONTAINERS"))**. Turn on the plan and the sensor."
+    else empty end ),
   "",
   "Agents installed inside the OS without a VM extension (GPO, Intune, scripts) show as unprotected here. Check those machines against the EDR console before acting.",
   "",
@@ -250,8 +291,9 @@ read -r -d '' JQ_REPORT <<'JQ'
 JQ
 
 SCOPE=$(cat "$DIR/raw/scope.json" 2>/dev/null || echo '{}')   # absent in runs made before it existed
+AKSF="$DIR/raw/aks_model.jsonl"; [[ -f "$AKSF" ]] || AKSF=/dev/null   # likewise
 ARGS=(--slurpfile m "$DIR/raw/model.jsonl" --rawfile subs "$DIR/subscriptions.tsv" --arg detected "$DETECTED"
-      --argjson scope "$SCOPE")
+      --argjson scope "$SCOPE" --slurpfile aks "$AKSF")
 # The rows go through a file: as a command-line argument they would hit the OS limit
 # (128 KB per argument on Linux, 32 KB per command line on Windows).
 ITEMS=$(mktemp) || die "cannot create a temporary file"

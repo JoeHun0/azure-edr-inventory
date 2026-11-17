@@ -14,7 +14,10 @@
 #   vm-win-off         platform  no agent, deallocated                -> MEDIUM
 #   vm-lnx-mdefail     platform  MDE extension failed, running        -> HIGH
 #   vm-lnx-std         legacy    no agent, Standard IP without NSG    -> HIGH (closed by default)
-#   aks-nodepool1-vmss prod-app  AKS node pool, no agent              -> MEDIUM
+#   aks-nodepool1-vmss prod-app  AKS node pool of cluster aks-prod: Defender for
+#                                Containers on, sensor on               -> LOW
+#                                (MOCK_CONTAINERS_OFF=1: plan Free; MOCK_AKS_SENSOR_OFF=1:
+#                                sensor off; MOCK_CONTAINERS_NOT_IN_ARG=1: plan read via REST)
 #   web-vmss           dev       MDE in the scale set model, 0 nodes  -> LOW
 #   arc-win            prod-app  Arc, MDE                             -> LOW
 #   arc-lnx            platform  Arc, disconnected, no agent          -> MEDIUM
@@ -61,6 +64,14 @@ case "$args" in
         {\"subscriptionId\":\"$S2\",\"name\":\"dev\",\"state\":\"Enabled\",\"mgChain\":[{\"displayName\":\"Non-prod\"},{\"displayName\":\"Tenant Root Group\"}]},
         {\"subscriptionId\":\"$S3\",\"name\":\"platform\",\"state\":\"Enabled\",\"mgChain\":[]},
         {\"subscriptionId\":\"$S4\",\"name\":\"legacy\",\"state\":\"Enabled\",\"mgChain\":null}" ;;
+      *"name =~ 'Containers'"*)
+        if [[ -n "${MOCK_CONTAINERS_NOT_IN_ARG:-}" ]]; then page ""
+        elif [[ -n "${MOCK_CONTAINERS_OFF:-}" ]]; then page "{\"subscriptionId\":\"$S1\",\"tier\":\"Free\",\"extensions\":null}"
+        else page "{\"subscriptionId\":\"$S1\",\"tier\":\"Standard\",\"extensions\":[{\"name\":\"ContainerSensor\",\"isEnabled\":\"True\"}]}"
+        fi ;;
+      *microsoft.containerservice/managedclusters*)
+        sensor=true; [[ -n "${MOCK_AKS_SENSOR_OFF:-}" ]] && sensor=false
+        page "{\"id\":\"/subscriptions/$S1/resourcegroups/aks-rg/providers/microsoft.containerservice/managedclusters/aks-prod\",\"name\":\"aks-prod\",\"subscriptionId\":\"$S1\",\"resourceGroup\":\"aks-rg\",\"location\":\"westeurope\",\"nodeRg\":\"mc_aks\",\"version\":\"1.30.5\",\"power\":\"Running\",\"sensor\":\"$sensor\"}" ;;
       *microsoft.security/pricings*) page "
         {\"subscriptionId\":\"$S1\",\"tier\":\"Standard\",\"subPlan\":\"P1\"},
         {\"subscriptionId\":\"$S2\",\"tier\":\"Free\",\"subPlan\":\"\"},
@@ -118,6 +129,8 @@ case "$args" in
 
   rest*)
     case "$url" in
+      */subscriptions/$S1/providers/Microsoft.Security/pricings/Containers*)
+        echo '{"name":"Containers","properties":{"pricingTier":"Standard","extensions":[{"name":"ContainerSensor","isEnabled":"True"}]}}' ;;
       */subscriptions/$S4/providers/Microsoft.Security/pricings/VirtualMachines*)
         echo '{"name":"VirtualMachines","properties":{"pricingTier":"Free"}}' ;;
       */subscriptions/$S1/providers/Microsoft.Security/settings/WDATP*) echo true ;;
