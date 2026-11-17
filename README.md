@@ -52,7 +52,7 @@ The `endpointProtection` column can show:
 
 ## Requirements
 
-- **Bash 4+** and **jq 1.6+**. Works on Linux, WSL, and macOS with Homebrew `bash`.
+- **Bash 4+** and **jq 1.6+**. Works on Linux, WSL, macOS with Homebrew `bash`, and Git Bash on Windows (the script handles the CRLF line endings of the Windows `az` and `jq`, and Git Bash's path rewriting).
   [Azure Cloud Shell](https://shell.azure.com) has both.
 - **Azure CLI**, signed in with `az login`, plus the Resource Graph extension:
   ```bash

@@ -69,6 +69,13 @@ done
 
 command -v az >/dev/null || die "az CLI not found"
 command -v jq >/dev/null || die "jq not found (sudo apt install jq)"
+
+# Windows (Git Bash, MSYS2, WSL calling the Windows az): Windows builds of az and jq
+# end their output lines with CRLF, and MSYS rewrites arguments that start with "/"
+# into Windows paths (--scope /providers/... becomes C:/Program Files/Git/providers/...).
+# Both make Azure answer "Bad Request". Strip the CRs and turn the rewriting off for az.
+az() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' command az "$@" | tr -d '\r'; }
+jq() { command jq "$@" | tr -d '\r'; }
 az extension show --name resource-graph --only-show-errors >/dev/null 2>&1 \
   || die "resource-graph extension missing: az extension add --name resource-graph"
 TENANT_ID=$(az account show --query tenantId -o tsv --only-show-errors </dev/null 2>/dev/null) \

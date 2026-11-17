@@ -73,6 +73,15 @@ bash "$SCRIPT" -S -o "$WORK/skip" 2>/dev/null
 is "integration unknown"                      "$(col "$WORK/skip/machines.tsv" vm-win-off mdeIntegration)" unknown
 is "status falls back to 'no sensor'"         "$(col "$WORK/skip/machines.tsv" vm-win-off endpointProtection)" "NONE - Defender plan on, no sensor"
 
+echo "Windows (Git Bash: CRLF output from az and jq, MSYS path rewriting)"
+REAL_JQ=$(type -P jq) PATH="$HERE/mock-windows:$PATH" bash "$SCRIPT" -o "$WORK/win" 2>"$WORK/winlog"
+if grep -q "Bad Request" "$WORK/winlog"; then
+  bad "no 'Bad Request' errors"; grep -m3 "Bad Request" "$WORK/winlog"
+else ok "no 'Bad Request' errors"; fi
+for f in machines subscriptions; do
+  if cmp -s "$WORK/out/$f.tsv" "$WORK/win/$f.tsv"; then ok "$f.tsv same as on Linux"; else bad "$f.tsv same as on Linux"; fi
+done
+
 echo "argument checks"
 if ! bash "$SCRIPT" -s not-a-guid >/dev/null 2>&1; then ok "rejects a malformed subscription ID"; else bad "rejects a malformed subscription ID"; fi
 if ! bash "$SCRIPT" -p "22,3389" >/dev/null 2>&1; then ok "rejects a malformed port list"; else bad "rejects a malformed port list"; fi
