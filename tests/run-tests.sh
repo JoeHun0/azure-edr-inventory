@@ -158,6 +158,34 @@ if grep -q "containers plans: 1/1" "$WORK/crestlog"; then ok "  ... with progres
 rm -f "$WORK/coff/raw/aks_model.jsonl"; bash "$SUM" -o "$WORK/old" "$WORK/coff" 2>/dev/null
 line "older run without cluster data: still summarised" "Defender for Containers coverage not checked in this run" "$WORK/old/edr-report.md"
 
+echo "AKS detection: cluster match, orphans, mc_ resource groups"
+MOCK_ORPHAN=1 bash "$SCRIPT" -o "$WORK/orph" 2>/dev/null
+is "tagged node pool without cluster -> orphan" "$(col "$WORK/orph/machines.tsv" aks-oldpool-vmss endpointProtection)" "NONE - orphaned AKS node pool"
+is "  ... running -> HIGH"                  "$(col "$WORK/orph/machines.tsv" aks-oldpool-vmss risk)" HIGH
+is "scale set in an mc_ group, no AKS tag -> not AKS" "$(col "$WORK/orph/machines.tsv" batch-vmss aksNodePool)" ""
+is "  ... judged by Defender for Servers" "$(col "$WORK/orph/machines.tsv" batch-vmss endpointProtection)" "NONE - Defender plan on, no sensor"
+bash "$SUM" "$WORK/orph" 2>/dev/null
+line "  ... orphan worklist item"           '"EDR-AKS-ORPHAN:/subscriptions/11111111-0000-0000-0000-000000000001/resourcegroups/mc_old/providers/microsoft.compute/virtualmachinescalesets/aks-oldpool-vmss","HIGH","2"' "$WORK/orph/edr-worklist.csv"
+line "  ... orphan count in the report"     "its cluster no longer exists): **1**" "$WORK/orph/edr-report.md"
+is "aks_clusters.tsv: node resource group" "$(awk -F'\t' 'NR==1 {for (i = 1; i <= NF; i++) if ($i == "nodeResourceGroup") c = i} NR==2 {print $c}' "$WORK/out/aks_clusters.tsv")" mc_aks
+
+echo "-R (rebuild from raw/)"
+cp -r "$WORK/out" "$WORK/rb"; for f in "$WORK/rb"/*.tsv "$WORK/rb/raw/model.jsonl"; do : > "$f"; done
+export MOCK_CALLS="$WORK/calls"; : > "$MOCK_CALLS"
+if bash "$SCRIPT" -R "$WORK/rb" 2>"$WORK/rblog"; then ok "rebuild exits 0"; else bad "rebuild exits 0"; cat "$WORK/rblog"; fi
+if [[ ! -s "$MOCK_CALLS" ]]; then ok "rebuild makes no az calls"; else bad "rebuild makes no az calls"; head -3 "$MOCK_CALLS"; fi
+unset MOCK_CALLS
+same=1; for f in machines subscriptions aks_clusters; do cmp -s "$WORK/out/$f.tsv" "$WORK/rb/$f.tsv" || { same=0; echo "    differs: $f.tsv"; }; done
+if ((same)); then ok "rebuild reproduces every report"; else bad "rebuild reproduces every report"; fi
+bash "$SCRIPT" -R "$WORK/rb" -p "22" 2>/dev/null
+is "rebuild with -p re-evaluates exposure" "$(col "$WORK/rb/machines.tsv" vm-win-av mgmtPortsOpenToInternet)" 22
+cp -r "$WORK/out" "$WORK/oldrun"; rm -f "$WORK/oldrun/raw/"{aks,cpricing,cpricing_rest}.jsonl
+sed -i 's/"aksTag":/"aks":/' "$WORK/oldrun/raw/vmss.jsonl"
+if bash "$SCRIPT" -R "$WORK/oldrun" 2>/dev/null; then ok "rebuild of a run made before the AKS check"; else bad "rebuild of a run made before the AKS check"; fi
+is "  ... old loose AKS flag no longer used" "$(col "$WORK/oldrun/machines.tsv" aks-nodepool1-vmss aksNodePool)" ""
+if ! bash "$SCRIPT" -R "$WORK/rb" -o "$WORK/x" >/dev/null 2>&1; then ok "-R can't be combined with -o"; else bad "-R can't be combined with -o"; fi
+if ! bash "$SCRIPT" -R "$WORK/nonexistent" >/dev/null 2>&1; then ok "-R rejects a folder without raw data"; else bad "-R rejects a folder without raw data"; fi
+
 echo "argument checks"
 if ! bash "$SCRIPT" -s not-a-guid >/dev/null 2>&1; then ok "rejects a malformed subscription ID"; else bad "rejects a malformed subscription ID"; fi
 if ! bash "$SCRIPT" -p "22,3389" >/dev/null 2>&1; then ok "rejects a malformed port list"; else bad "rejects a malformed port list"; fi

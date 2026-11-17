@@ -103,7 +103,11 @@ read -r -d '' JQ_ROWS <<'JQ'
              (if .aks then
                 # covered by the per-cluster items below, except where the cluster wasn't found
                 # (or the run is older than the Defender for Containers check)
-                (if ($aks | length) == 0 or .edr == "NONE - AKS cluster not found" then
+                (if .edr == "NONE - orphaned AKS node pool" then
+                   item(3; "EDR-AKS-ORPHAN"; "Orphaned AKS node pool: its cluster no longer exists";
+                     "Confirm the cluster was deleted, then remove the leftover scale set and node resource group: nothing maintains or protects it. If it is still in use, put it under an owner and protect it.";
+                     "")
+                 elif ($aks | length) == 0 then
                    item(2; "EDR-AKS"; "AKS node pool without Defender for Containers coverage";
                      "Find the node pool's AKS cluster and check that Defender for Containers covers it (plan on for the subscription, sensor on for the cluster).";
                      "")
@@ -258,7 +262,7 @@ read -r -d '' JQ_REPORT <<'JQ'
       ( [$aks[] | .subscriptionId | ascii_downcase] | unique | length ) as $as
       | ( [$aks[] | select(.containersPlan != "Standard") | .subscriptionId | ascii_downcase] | unique | length ) as $off
       | "- Subscriptions with AKS clusters: **\($as)**, of which without Defender for Containers: **\($off)**",
-      "- Node pools whose cluster wasn't found: **\($M | cnt(.edr == "NONE - AKS cluster not found"))**",
+      "- Orphaned AKS node pools (the scale set carries AKS's node-pool tag, but its cluster no longer exists): **\($M | cnt(.edr == "NONE - orphaned AKS node pool"))**",
       ""
     else empty end ),
   "## Other",

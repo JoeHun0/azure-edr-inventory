@@ -25,6 +25,7 @@
 # SPDX-License-Identifier: MIT
 
 args="$*"
+[[ -n "${MOCK_CALLS:-}" ]] && printf '%s\n' "$args" >> "$MOCK_CALLS"
 url=""; prev=""
 for x in "$@"; do [[ "$prev" == "--url" ]] && url="$x"; prev="$x"; done
 
@@ -51,6 +52,13 @@ nic() {  # nic <name> <nsg or ""> <subnet> <pip or "">
     "$(echo "$NET/networkInterfaces/$1" | tr 'A-Z' 'a-z')" "$nsg" "$NET" "$3" "$pip"
 }
 lc() { echo "$1" | tr 'A-Z' 'a-z'; }
+# MOCK_ORPHAN=1: an orphaned AKS node pool (AKS tag, cluster deleted) and a regular scale set
+# in a resource group whose name merely starts with mc_
+extra_vmss() {
+  [[ -n "${MOCK_ORPHAN:-}" ]] || return 0
+  printf ',{"id":"/subscriptions/%s/resourcegroups/mc_old/providers/microsoft.compute/virtualmachinescalesets/aks-oldpool-vmss","name":"aks-oldpool-vmss","subscriptionId":"%s","resourceGroup":"mc_old","location":"westeurope","osType":"Linux","image":"//","capacity":2,"extensions":[],"aksTag":true}' "$S1" "$S1"
+  printf ',{"id":"/subscriptions/%s/resourcegroups/mc_batch/providers/microsoft.compute/virtualmachinescalesets/batch-vmss","name":"batch-vmss","subscriptionId":"%s","resourceGroup":"mc_batch","location":"westeurope","osType":"Linux","image":"Canonical/ubuntu/22_04","capacity":2,"extensions":[],"aksTag":false}' "$S1" "$S1"
+}
 page() { printf '{"data":[%s],"skip_token":%s}\n' "$1" "${2:-null}"; }
 
 case "$args" in
@@ -94,8 +102,8 @@ case "$args" in
         $(ext $S2 vm-lnx-cs CrowdStrike.Falcon FalconSensorLinux Succeeded),
         $(ext $S3 vm-lnx-mdefail Microsoft.Azure.AzureDefenderForServers MDE.Linux Failed)" ;;
       *virtualmachinescalesets*) page "
-        {\"id\":\"/subscriptions/$S1/resourcegroups/mc_aks/providers/microsoft.compute/virtualmachinescalesets/aks-nodepool1-vmss\",\"name\":\"aks-nodepool1-vmss\",\"subscriptionId\":\"$S1\",\"resourceGroup\":\"mc_aks\",\"location\":\"westeurope\",\"osType\":\"Linux\",\"image\":\"//\",\"capacity\":3,\"extensions\":[{\"name\":\"vmssCSE\",\"properties\":{\"publisher\":\"Microsoft.Azure.Extensions\",\"type\":\"CustomScript\"}}],\"aks\":true},
-        {\"id\":\"/subscriptions/$S2/resourcegroups/rg/providers/microsoft.compute/virtualmachinescalesets/web-vmss\",\"name\":\"web-vmss\",\"subscriptionId\":\"$S2\",\"resourceGroup\":\"rg\",\"location\":\"westeurope\",\"osType\":\"Windows\",\"image\":\"MicrosoftWindowsServer/WindowsServer/2022-datacenter\",\"capacity\":0,\"extensions\":[{\"name\":\"MDE\",\"properties\":{\"publisher\":\"Microsoft.Azure.AzureDefenderForServers\",\"type\":\"MDE.Windows\"}}],\"aks\":false}" ;;
+        {\"id\":\"/subscriptions/$S1/resourcegroups/mc_aks/providers/microsoft.compute/virtualmachinescalesets/aks-nodepool1-vmss\",\"name\":\"aks-nodepool1-vmss\",\"subscriptionId\":\"$S1\",\"resourceGroup\":\"mc_aks\",\"location\":\"westeurope\",\"osType\":\"Linux\",\"image\":\"//\",\"capacity\":3,\"extensions\":[{\"name\":\"vmssCSE\",\"properties\":{\"publisher\":\"Microsoft.Azure.Extensions\",\"type\":\"CustomScript\"}}],\"aksTag\":true},
+        {\"id\":\"/subscriptions/$S2/resourcegroups/rg/providers/microsoft.compute/virtualmachinescalesets/web-vmss\",\"name\":\"web-vmss\",\"subscriptionId\":\"$S2\",\"resourceGroup\":\"rg\",\"location\":\"westeurope\",\"osType\":\"Windows\",\"image\":\"MicrosoftWindowsServer/WindowsServer/2022-datacenter\",\"capacity\":0,\"extensions\":[{\"name\":\"MDE\",\"properties\":{\"publisher\":\"Microsoft.Azure.AzureDefenderForServers\",\"type\":\"MDE.Windows\"}}],\"aksTag\":false}$(extra_vmss)" ;;
       *"hybridcompute/machines'"*) page "
         {\"id\":\"/subscriptions/$S1/resourcegroups/onprem/providers/microsoft.hybridcompute/machines/arc-win\",\"name\":\"arc-win\",\"subscriptionId\":\"$S1\",\"resourceGroup\":\"onprem\",\"location\":\"westeurope\",\"osType\":\"windows\",\"osName\":\"Windows Server 2019 Standard\",\"osVersion\":\"10.0.17763\",\"status\":\"Connected\"},
         {\"id\":\"/subscriptions/$S3/resourcegroups/onprem/providers/microsoft.hybridcompute/machines/arc-lnx\",\"name\":\"arc-lnx\",\"subscriptionId\":\"$S3\",\"resourceGroup\":\"onprem\",\"location\":\"westeurope\",\"osType\":\"linux\",\"osName\":\"CentOS Linux 7\",\"osVersion\":\"7.9\",\"status\":\"Disconnected\"}" ;;

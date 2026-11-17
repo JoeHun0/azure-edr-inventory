@@ -32,6 +32,9 @@
 #                                             (for VMs that a schedule starts and stops)
 #   ./azure-edr-inventory.sh -o <dir>         output folder
 #                                             (default ./edr-inventory-YYYYMMDD-HHMM)
+#   ./azure-edr-inventory.sh -R <dir>         rebuild the ratings and reports of an earlier run
+#                                             from its raw/ data - no Azure calls, takes seconds
+#                                             (can be combined with -r, -p and -s)
 #
 # Output (tab-separated, opens in LibreOffice Calc / Excel):
 #   machines.tsv       one row per machine, highest risk first
@@ -53,13 +56,15 @@ PORTS="22 3389 5985 5986"
 SKIP_SETTINGS=0
 SCHEDULED=0
 OUTDIR=""
-while getopts ":s:p:Sro:h" opt; do
+REBUILD=""
+while getopts ":s:p:Sro:R:h" opt; do
   case "$opt" in
     s) SUBS+=("$OPTARG") ;;
     p) PORTS="$OPTARG" ;;
     S) SKIP_SETTINGS=1 ;;
     r) SCHEDULED=1 ;;
     o) OUTDIR="$OPTARG" ;;
+    R) REBUILD="$OPTARG" ;;
     h) usage; exit 0 ;;
     *) echo "Unknown option. Use -h for help." >&2; exit 2 ;;
   esac
@@ -75,8 +80,9 @@ for s in "${SUBS[@]}"; do
 done
 [[ "$PORTS" =~ ^[0-9]+( [0-9]+)*$ ]] || die "-p takes space-separated port numbers, e.g. \"22 3389\""
 
-command -v az >/dev/null || die "az CLI not found"
 command -v jq >/dev/null || die "jq not found (sudo apt install jq)"
+[[ -z "$REBUILD" ]] || { [[ -z "$OUTDIR" ]] && ((SKIP_SETTINGS == 0)); } || die "-R can't be combined with -o or -S"
+[[ -n "$REBUILD" ]] || command -v az >/dev/null || die "az CLI not found"
 
 # Windows (Git Bash, MSYS2, WSL calling the Windows az): Windows builds of az and jq
 # end their output lines with CRLF, and MSYS rewrites arguments that start with "/"
@@ -84,12 +90,24 @@ command -v jq >/dev/null || die "jq not found (sudo apt install jq)"
 # Both make Azure answer "Bad Request". Strip the CRs and turn the rewriting off for az.
 az() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' command az "$@" | tr -d '\r'; }
 jq() { command jq "$@" | tr -d '\r'; }
+umask 077
+
+if [[ -n "$REBUILD" ]]; then
+  OUTDIR="$REBUILD"
+  RAW="$OUTDIR/raw"
+  for f in subs pricing pricing_rest mde_settings vms vmext vmss arc arcext nics pips nsgs subnets; do
+    [[ -f "$RAW/$f.jsonl" ]] || die "$RAW/$f.jsonl not found - is $OUTDIR an azure-edr-inventory output folder?"
+  done
+  for f in cpricing cpricing_rest aks; do   # absent in runs made before the AKS check
+    [[ -f "$RAW/$f.jsonl" ]] || : > "$RAW/$f.jsonl"
+  done
+  log "Rebuilding the ratings and reports in $OUTDIR from raw/ (no Azure calls)..."
+else   # steps 1-2 read from Azure; -R skips them
 az extension show --name resource-graph --only-show-errors >/dev/null 2>&1 \
   || die "resource-graph extension missing: az extension add --name resource-graph"
 TENANT_ID=$(az account show --query tenantId -o tsv --only-show-errors </dev/null 2>/dev/null) \
   && [[ -n "$TENANT_ID" ]] || die "not logged in: run az login"
 
-umask 077
 OUTDIR=${OUTDIR:-"./edr-inventory-$(date +%Y%m%d-%H%M)"}
 RAW="$OUTDIR/raw"
 mkdir -p "$RAW" || die "cannot create $RAW"
@@ -168,7 +186,7 @@ run_arg vmss "virtual machine scale sets" "resources
                          tostring(properties.virtualMachineProfile.storageProfile.imageReference.sku)),
           capacity = toint(sku.capacity),
           extensions = properties.virtualMachineProfile.extensionProfile.extensions,
-          aks = isnotempty(tostring(tags['aks-managed-poolName'])) or tolower(resourceGroup) startswith 'mc_'"
+          aksTag = isnotempty(tostring(tags['aks-managed-poolName']))"
 
 run_arg cpricing "Defender for Containers plans" "securityresources
 | where type =~ 'microsoft.security/pricings' and name =~ 'Containers'
@@ -288,6 +306,8 @@ else
   done
 fi
 
+fi   # end of steps 1-2
+
 # ---------------------------------------------------------------- 3. model
 log "Building reports..."
 SUBS_JSON=$(printf '%s\n' "${SUBS[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0) | ascii_downcase)')
@@ -343,7 +363,7 @@ def edr($exts; $plan; $mde; $other):
 
 # --- Defender for Containers: plan on for the subscription and sensor on for the cluster
 def containers_status($cp; $cl):
-  if $cl == null then "NONE - AKS cluster not found"
+  if $cl == null then "NONE - orphaned AKS node pool"
   elif ($cp.tier // "") != "Standard" then "NONE - no Defender for Containers"
   elif (($cl.sensor // "") | tostring | lc) == "true" then "DEFENDER FOR CONTAINERS"
   else "NONE - Containers plan on, no sensor" end;
@@ -377,7 +397,7 @@ def mgpath: [(. // [])[] | .displayName] | reverse | join(" / ");
     + [ $vmss[] | {kind: "VMSS", id, name, subscriptionId, resourceGroup, location, osType, osDetail: .image,
                  state: "capacity \(.capacity // 0)", active: ($scheduled or (.capacity // 0) > 0),
                  exts: [(.extensions // [])[] | (.properties // .) | {publisher, extType: .type, state: ""}],
-                 nicIds: [], aks: (.aks // false)} ]
+                 nicIds: [], aks: false, aksTag: (.aksTag // false)} ]
     + [ $arc[] | {kind: "Arc", id, name, subscriptionId, resourceGroup, location, osType,
                 osDetail: "\(.osName // "") \(.osVersion // "")", state: (.status // "unknown"),
                 active: ((.status // "") == "Connected"), exts: ($extBy[.id] // []), nicIds: [], aks: false} ]
@@ -387,7 +407,10 @@ def mgpath: [(. // [])[] | .displayName] | reverse | join(" / ");
 | ($mdeBy[.subscriptionId | lc].mde // (if $plan.tier == "Standard" then "unknown" else "n/a" end)) as $mde
 | (if .kind == "VM" then exposure(.nicIds; $nicBy; $pipBy; $nsgBy; $subnetBy; $ports)
    else {publicIps: [], openPorts: []} end) as $x
-| (if .aks then $clusterBy["\(.subscriptionId | lc)/\(.resourceGroup | lc)"] else null end) as $cl
+# a scale set is an AKS node pool when it sits in an AKS cluster's node resource group;
+# one that still carries AKS's node-pool tag but has no cluster is an orphaned node pool
+| (if .kind == "VMSS" then $clusterBy["\(.subscriptionId | lc)/\(.resourceGroup | lc)"] else null end) as $cl
+| . + {aks: ($cl != null or (.aksTag // false))}
 | edr(.exts; $plan; $mde; $other) as $agent
 # AKS nodes are covered by Defender for Containers, not Defender for Servers: unless a
 # node pool carries its own EDR extension, it gets its cluster's Containers status
@@ -402,7 +425,7 @@ def mgpath: [(. // [])[] | .displayName] | reverse | join(" / ");
        securityExtensions: ([.exts[] | "\(.publisher).\(.extType)" | select(lc | test("mde\\.|antimalware|" + $other))] | unique | join(", ")),
        publicIps: $x.publicIps, openPorts: $x.openPorts}
 | . + {risk: risk}
-| del(.exts, .nicIds)
+| del(.exts, .nicIds, .aksTag)
 JQ
 
 jq -n -c \
@@ -437,7 +460,7 @@ jq -n -c --slurpfile aks "$RAW/aks.jsonl" --slurpfile subs "$RAW/subs.jsonl" \
      status: (if ($cp.tier // "") != "Standard" then "NONE - no Defender for Containers"
               elif (((.sensor // "") | tostring | lc) == "true") then "DEFENDER FOR CONTAINERS"
               else "NONE - Containers plan on, no sensor" end),
-     nodePools: ($pools | length),
+     nodePools: ($pools | length), nodeResourceGroup: (.nodeRg // ""),
      mgPath: ([($subBy[.subscriptionId | lc].mgChain // [])[] | .displayName] | reverse | join(" / "))}' \
   > "$RAW/aks_model.jsonl" || warn "AKS cluster report failed"
 
@@ -446,10 +469,11 @@ JQ_LABEL='def risklabel: ["", "LOW", "MEDIUM", "HIGH", "CRITICAL"][.];'
 
 jq -r -s '
   (["cluster", "subscription", "subscriptionId", "resourceGroup", "location", "kubernetesVersion", "powerState",
-    "containersPlan", "planSensorProvisioning", "clusterSensor", "status", "nodePools", "managementGroups"] | @tsv),
+    "containersPlan", "planSensorProvisioning", "clusterSensor", "status", "nodePools", "managementGroups",
+    "nodeResourceGroup"] | @tsv),
   (sort_by((if .status == "DEFENDER FOR CONTAINERS" then 1 else 0 end), .subscription, .name)[]
    | [.name, .subscription, .subscriptionId, .resourceGroup, .location, .version, .power, .containersPlan,
-      .planSensorProvisioning, .clusterSensor, .status, .nodePools, .mgPath] | @tsv)' \
+      .planSensorProvisioning, .clusterSensor, .status, .nodePools, .mgPath, .nodeResourceGroup] | @tsv)' \
   "$RAW/aks_model.jsonl" > "$OUTDIR/aks_clusters.tsv"
 
 jq -r -s "$JQ_LABEL"'
