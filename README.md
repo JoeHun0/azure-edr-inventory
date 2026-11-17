@@ -17,7 +17,7 @@ Azure Arc machines across every subscription, and sorts them by a rough risk rat
    ```
 2. Run the inventory. It only reads. Expect a few minutes, even for large tenants:
    ```bash
-   ./azure-edr-inventory.sh
+   ./azure-edr-inventory.sh        # add -r if a schedule starts and stops your VMs
    ```
    The results go to a new folder, `./edr-inventory-YYYYMMDD-HHMM/`.
 3. Turn the results into a report and a worklist:
@@ -97,6 +97,7 @@ cd azure-edr-inventory
 ./azure-edr-inventory.sh -s <subId> -s <subId> # only these subscriptions
 ./azure-edr-inventory.sh -p "22 3389"          # management ports to check (default "22 3389 5985 5986")
 ./azure-edr-inventory.sh -S                    # skip the per-subscription Defender settings calls
+./azure-edr-inventory.sh -r                    # VMs on a start/stop schedule: rate stopped VMs as running
 ./azure-edr-inventory.sh -o ~/reports/edr      # choose the output folder
 ./azure-edr-inventory.sh -h                    # help
 ```
@@ -124,6 +125,11 @@ For a shareable summary and a to-do list, run `edr-summary.sh` on the folder: se
 A **heuristic to sort by**, not a verdict. *Unprotected* means `NONE…`, `AV ONLY` or a failed MDE
 extension. *Active* means a running VM, a scale set with more than 0 instances, or a connected Arc machine
 (a VM with unknown power state counts as active).
+
+**VMs on a start/stop schedule:** if an automation starts and stops your VMs, a VM that happens to be off
+during the run is still in daily use. Run the inventory with `-r` (or during working hours), so stopped VMs
+and scale sets at 0 instances are rated as if they were running. The `state` column still shows the real
+state.
 
 | Rating | Condition |
 |---|---|

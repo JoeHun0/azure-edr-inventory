@@ -25,6 +25,8 @@
 #   ./azure-edr-inventory.sh -s <subId> ...   only these subscriptions (-s can be repeated)
 #   ./azure-edr-inventory.sh -p "22 3389"     management ports to check (default "22 3389 5985 5986")
 #   ./azure-edr-inventory.sh -S               skip the per-subscription Defender settings calls
+#   ./azure-edr-inventory.sh -r               rate stopped VMs and scale sets at 0 as running
+#                                             (for VMs that a schedule starts and stops)
 #   ./azure-edr-inventory.sh -o <dir>         output folder
 #                                             (default ./edr-inventory-YYYYMMDD-HHMM)
 #
@@ -45,12 +47,14 @@ usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; }
 SUBS=()
 PORTS="22 3389 5985 5986"
 SKIP_SETTINGS=0
+SCHEDULED=0
 OUTDIR=""
-while getopts ":s:p:So:h" opt; do
+while getopts ":s:p:Sro:h" opt; do
   case "$opt" in
     s) SUBS+=("$OPTARG") ;;
     p) PORTS="$OPTARG" ;;
     S) SKIP_SETTINGS=1 ;;
+    r) SCHEDULED=1 ;;
     o) OUTDIR="$OPTARG" ;;
     h) usage; exit 0 ;;
     *) echo "Unknown option. Use -h for help." >&2; exit 2 ;;
@@ -293,9 +297,9 @@ def mgpath: [(. // [])[] | .displayName] | reverse | join(" / ");
                 state: ((.power // "") | sub("^PowerState/"; "") | if . == "" then "unknown" else . end),
                 exts: ($extBy[.id] // []),
                 nicIds: [(.nics // [])[] | .id], aks: false}
-      | . + {active: (.state | IN("running", "starting", "unknown"))} ]
+      | . + {active: ($scheduled or (.state | IN("running", "starting", "unknown")))} ]
     + [ $vmss[] | {kind: "VMSS", id, name, subscriptionId, resourceGroup, location, osType, osDetail: .image,
-                 state: "capacity \(.capacity // 0)", active: ((.capacity // 0) > 0),
+                 state: "capacity \(.capacity // 0)", active: ($scheduled or (.capacity // 0) > 0),
                  exts: [(.extensions // [])[] | (.properties // .) | {publisher, extType: .type, state: ""}],
                  nicIds: [], aks: (.aks // false)} ]
     + [ $arc[] | {kind: "Arc", id, name, subscriptionId, resourceGroup, location, osType,
@@ -326,6 +330,7 @@ jq -n -c \
   --slurpfile nics "$RAW/nics.jsonl" --slurpfile pips "$RAW/pips.jsonl" \
   --slurpfile nsgs "$RAW/nsgs.jsonl" --slurpfile subnets "$RAW/subnets.jsonl" \
   --argjson scope "$SUBS_JSON" --argjson ports "$PORTS_JSON" --arg other "$OTHER_EDR" \
+  --argjson scheduled "$([[ $SCHEDULED == 1 ]] && echo true || echo false)" \
   "$JQ_MODEL" > "$RAW/model.jsonl" || die "report building failed (raw data kept in $RAW)"
 
 # ---------------------------------------------------------------- 4. reports

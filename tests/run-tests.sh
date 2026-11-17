@@ -68,6 +68,13 @@ bash "$SCRIPT" -p "22" -o "$WORK/ports" 2>/dev/null
 is "only port 22 checked"                     "$(col "$WORK/ports/machines.tsv" vm-win-av mgmtPortsOpenToInternet)" 22
 is "3389 no longer counted -> LOW"            "$(col "$WORK/ports/machines.tsv" vm-lnx-cs risk)" LOW
 
+echo "-r (scheduled start/stop: stopped VMs rated as running)"
+bash "$SCRIPT" -r -o "$WORK/sched" 2>/dev/null
+is "deallocated unprotected VM -> HIGH"       "$(col "$WORK/sched/machines.tsv" vm-win-off risk)" HIGH
+is "scale set at capacity 0 still LOW when protected" "$(col "$WORK/sched/machines.tsv" web-vmss risk)" LOW
+is "disconnected Arc machine unchanged -> MEDIUM" "$(col "$WORK/sched/machines.tsv" arc-lnx risk)" MEDIUM
+is "state column still shows the real state"  "$(col "$WORK/sched/machines.tsv" vm-win-off state)" deallocated
+
 echo "-S (skip Defender settings)"
 bash "$SCRIPT" -S -o "$WORK/skip" 2>/dev/null
 is "integration unknown"                      "$(col "$WORK/skip/machines.tsv" vm-win-off mdeIntegration)" unknown
